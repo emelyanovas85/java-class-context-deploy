@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: java-context-service
+  jackson:
+    serialization:
+      indent-output: true
+
+logging:
+  level:
+    ru.kalinin.context: DEBUG
