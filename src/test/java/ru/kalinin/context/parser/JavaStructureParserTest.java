@@ -12,11 +12,15 @@ class JavaStructureParserTest {
 
     private final JavaStructureParser parser = new JavaStructureParser();
 
+    // Важно: в фикстурном исходнике обязательно указывать импорты для всех пользовательских типов.
+    // buildImportMap строит карту simpleName → qualifiedName из import-деклараций,
+    // и только так resolveType возвращает fully-qualified name.
     private static final String SIMPLE_CLASS = """
             package com.example;
 
             import org.springframework.stereotype.Service;
             import java.util.List;
+            import com.example.UserRepository;
 
             @Service
             public class UserService implements UserRepository {
@@ -94,6 +98,8 @@ class JavaStructureParserTest {
                 .filter(m -> m.isConstructor()).findFirst().orElseThrow();
         assertThat(constructor.name()).isEqualTo("UserService");
         assertThat(constructor.parameters()).hasSize(1);
+        // параметр тоже резолвится через importMap
+        assertThat(constructor.parameters().get(0).type()).isEqualTo("com.example.UserRepository");
 
         var findAll = cs.methods().stream()
                 .filter(m -> !m.isConstructor()).findFirst().orElseThrow();
@@ -133,7 +139,7 @@ class JavaStructureParserTest {
         List<ClassStructure> result = parser.parse(SIMPLE_CLASS, "UserService.java", 0);
         Set<String> types = parser.collectReferencedTypes(result.get(0));
 
-        // Service аннотация, UserRepository поле + implements
+        // Service аннотация и UserRepository теперь резолвится в qualified name
         assertThat(types).contains("Service", "com.example.UserRepository");
         // встроенные типы не возвращаются
         assertThat(types).doesNotContain("void", "String", "int");
