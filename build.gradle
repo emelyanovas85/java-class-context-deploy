@@ -28,17 +28,25 @@ dependencies {
     // JavaParser — парсинг Java-исходников
     implementation 'com.github.javaparser:javaparser-core:3.26.3'
 
-    // Lombok
-    compileOnly 'org.projectlombok:lombok'
-    annotationProcessor 'org.projectlombok:lombok'
+    // Lombok 1.18.40 — первый релиз с поддержкой Java 25
+    // Для JDK 23+ обязательно явно указывать как annotationProcessor
+    compileOnly 'org.projectlombok:lombok:1.18.40'
+    annotationProcessor 'org.projectlombok:lombok:1.18.40'
 
     // Jackson (уже в spring-boot-starter-web, явно для ясности)
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 
     // Тесты
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testCompileOnly 'org.projectlombok:lombok:1.18.40'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.40'
 }
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+// Обязательно для JDK 23+: включить полную обработку аннотаций
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-proc:full']
 }
