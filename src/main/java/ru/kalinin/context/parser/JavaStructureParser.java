@@ -17,6 +17,15 @@ import java.util.*;
 
 /**
  * Парсит Java-исходники с помощью JavaParser и строит {@link ClassStructure}.
+ *
+ * <p>resolveType работает в три шага:</p>
+ * <ol>
+ *   <li>explicit import: {@code import com.example.Foo} → {@code com.example.Foo}</li>
+ *   <li>тот же пакет: если не найден в importMap и не является
+ *       встроенным типом/java.*-типом,
+ *       добавляет префикс пакета текущего файла</li>
+ *   <li>возвращает simple name как есть (встроенные, void и т.д.)</li>
+ * </ol>
  */
 @Slf4j
 @Component
@@ -29,6 +38,10 @@ public class JavaStructureParser {
         config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
         this.parser = new JavaParser(config);
     }
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
 
     /**
      * Парсит исходник и возвращает список структур всех классов верхнего уровня.
@@ -53,172 +66,9 @@ public class JavaStructureParser {
 
         List<ClassStructure> structures = new ArrayList<>();
         for (TypeDeclaration<?> typeDecl : cu.getTypes()) {
-            structures.add(buildClassStructure(typeDecl, packageName, importMap, sourceFile, contextLevel));
+            structures.add(buildClassStructure(typeDecl, packageName, importMap, packageName, sourceFile, contextLevel));
         }
         return structures;
-    }
-
-    private ClassStructure buildClassStructure(
-            TypeDeclaration<?> typeDecl,
-            String packageName,
-            Map<String, String> importMap,
-            String sourceFile,
-            int contextLevel) {
-
-        String simpleName = typeDecl.getNameAsString();
-        String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
-
-        List<AnnotationInfo> annotations = extractAnnotations(typeDecl.getAnnotations());
-        List<String> modifiers = extractModifiers(typeDecl.getModifiers());
-        String kind = detectKind(typeDecl);
-
-        String extendedType = null;
-        List<String> implementedTypes = new ArrayList<>();
-        List<String> typeParameters = new ArrayList<>();
-
-        if (typeDecl instanceof ClassOrInterfaceDeclaration coid) {
-            typeParameters = coid.getTypeParameters().stream().map(Object::toString).toList();
-            if (!coid.getExtendedTypes().isEmpty()) {
-                extendedType = resolveType(coid.getExtendedTypes().get(0), importMap);
-            }
-            implementedTypes = coid.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap)).toList();
-        } else if (typeDecl instanceof RecordDeclaration rd) {
-            typeParameters = rd.getTypeParameters().stream().map(Object::toString).toList();
-            implementedTypes = rd.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap)).toList();
-        } else if (typeDecl instanceof EnumDeclaration ed) {
-            implementedTypes = ed.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap)).toList();
-        }
-
-        List<FieldInfo> fields = typeDecl.getFields().stream()
-                .flatMap(fd -> extractFields(fd, importMap).stream())
-                .toList();
-
-        List<MethodInfo> methods = new ArrayList<>();
-        typeDecl.getMethods().forEach(md -> methods.add(extractMethod(md, importMap)));
-        typeDecl.getConstructors().forEach(cd -> methods.add(extractConstructor(cd, importMap)));
-
-        // Record components as pseudo-fields
-        if (typeDecl instanceof RecordDeclaration rd) {
-            List<FieldInfo> recordComponents = rd.getParameters().stream()
-                    .map(p -> new FieldInfo(
-                            extractAnnotations(p.getAnnotations()),
-                            List.of(),
-                            resolveType(p.getType(), importMap),
-                            p.getNameAsString(),
-                            null))
-                    .toList();
-            List<FieldInfo> combined = new ArrayList<>(recordComponents);
-            combined.addAll(fields);
-            fields = combined;
-        }
-
-        List<ClassStructure> nested = typeDecl.getMembers().stream()
-                .filter(m -> m instanceof TypeDeclaration)
-                .map(m -> buildClassStructure(
-                        (TypeDeclaration<?>) m, qualifiedName, importMap, sourceFile, contextLevel))
-                .toList();
-
-        return new ClassStructure(
-                annotations, modifiers, kind, simpleName, qualifiedName,
-                typeParameters, extendedType, implementedTypes,
-                fields, methods, nested, sourceFile, contextLevel);
-    }
-
-    private List<FieldInfo> extractFields(FieldDeclaration fd, Map<String, String> importMap) {
-        List<AnnotationInfo> annotations = extractAnnotations(fd.getAnnotations());
-        List<String> modifiers = extractModifiers(fd.getModifiers());
-        String type = resolveType(fd.getElementType(), importMap);
-        return fd.getVariables().stream()
-                .map(v -> new FieldInfo(
-                        annotations, modifiers, type, v.getNameAsString(),
-                        v.getInitializer().map(Expression::toString).orElse(null)))
-                .toList();
-    }
-
-    private MethodInfo extractMethod(MethodDeclaration md, Map<String, String> importMap) {
-        return new MethodInfo(
-                extractAnnotations(md.getAnnotations()),
-                extractModifiers(md.getModifiers()),
-                resolveType(md.getType(), importMap),
-                md.getNameAsString(),
-                md.getTypeParameters().stream().map(Object::toString).toList(),
-                md.getParameters().stream()
-                        .map(p -> new ParameterInfo(
-                                extractAnnotations(p.getAnnotations()),
-                                resolveType(p.getType(), importMap),
-                                p.getNameAsString(), p.isVarArgs()))
-                        .toList(),
-                md.getThrownExceptions().stream()
-                        .map(e -> resolveType(e, importMap)).toList(),
-                false);
-    }
-
-    private MethodInfo extractConstructor(ConstructorDeclaration cd, Map<String, String> importMap) {
-        return new MethodInfo(
-                extractAnnotations(cd.getAnnotations()),
-                extractModifiers(cd.getModifiers()),
-                null,
-                cd.getNameAsString(),
-                cd.getTypeParameters().stream().map(Object::toString).toList(),
-                cd.getParameters().stream()
-                        .map(p -> new ParameterInfo(
-                                extractAnnotations(p.getAnnotations()),
-                                resolveType(p.getType(), importMap),
-                                p.getNameAsString(), p.isVarArgs()))
-                        .toList(),
-                cd.getThrownExceptions().stream()
-                        .map(e -> resolveType(e, importMap)).toList(),
-                true);
-    }
-
-    private List<AnnotationInfo> extractAnnotations(NodeList<AnnotationExpr> annotations) {
-        return annotations.stream()
-                .map(a -> new AnnotationInfo(a.getNameAsString(), extractAnnotationAttributes(a)))
-                .toList();
-    }
-
-    private Map<String, String> extractAnnotationAttributes(AnnotationExpr annotation) {
-        Map<String, String> attrs = new LinkedHashMap<>();
-        if (annotation instanceof NormalAnnotationExpr nae) {
-            nae.getPairs().forEach(pair -> attrs.put(pair.getNameAsString(), pair.getValue().toString()));
-        } else if (annotation instanceof SingleMemberAnnotationExpr smae) {
-            attrs.put("value", smae.getMemberValue().toString());
-        }
-        return attrs;
-    }
-
-    private List<String> extractModifiers(NodeList<com.github.javaparser.ast.Modifier> modifiers) {
-        return modifiers.stream().map(m -> m.getKeyword().asString()).toList();
-    }
-
-    private String detectKind(TypeDeclaration<?> typeDecl) {
-        if (typeDecl instanceof ClassOrInterfaceDeclaration coid) return coid.isInterface() ? "interface" : "class";
-        if (typeDecl instanceof EnumDeclaration) return "enum";
-        if (typeDecl instanceof AnnotationDeclaration) return "@interface";
-        if (typeDecl instanceof RecordDeclaration) return "record";
-        return "class";
-    }
-
-    private String resolveType(Type type, Map<String, String> importMap) {
-        String raw = type.asString();
-        String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
-        String resolved = importMap.getOrDefault(base, base);
-        return raw.contains("<") ? resolved + raw.substring(raw.indexOf('<')) : resolved;
-    }
-
-    private Map<String, String> buildImportMap(CompilationUnit cu) {
-        Map<String, String> map = new HashMap<>();
-        for (ImportDeclaration imp : cu.getImports()) {
-            if (!imp.isAsterisk() && !imp.isStatic()) {
-                String qn = imp.getNameAsString();
-                String sn = qn.contains(".") ? qn.substring(qn.lastIndexOf('.') + 1) : qn;
-                map.put(sn, qn);
-            }
-        }
-        return map;
     }
 
     /**
@@ -248,8 +98,200 @@ public class JavaStructureParser {
         });
 
         cs.nestedClasses().forEach(nc -> types.addAll(collectReferencedTypes(nc)));
-        types.removeIf(this::isBuiltinType);
+
+        // Фильтруем встроенные типы и java.*-типы; пользовательские qualified типы (com.*,
+        // ru.* и т.д.) НЕ фильтруем — именно они нужны для построения следующего уровня.
+        types.removeIf(this::isBuiltinOrJavaLangType);
         return types;
+    }
+
+    // -------------------------------------------------------------------------
+    // Private: build structure
+    // -------------------------------------------------------------------------
+
+    private ClassStructure buildClassStructure(
+            TypeDeclaration<?> typeDecl,
+            String packageName,
+            Map<String, String> importMap,
+            String filePackage,    // пакет файла — для fallback резольвинга типов того же пакета
+            String sourceFile,
+            int contextLevel) {
+
+        String simpleName = typeDecl.getNameAsString();
+        String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+
+        List<AnnotationInfo> annotations = extractAnnotations(typeDecl.getAnnotations());
+        List<String> modifiers = extractModifiers(typeDecl.getModifiers());
+        String kind = detectKind(typeDecl);
+
+        String extendedType = null;
+        List<String> implementedTypes = new ArrayList<>();
+        List<String> typeParameters = new ArrayList<>();
+
+        if (typeDecl instanceof ClassOrInterfaceDeclaration coid) {
+            typeParameters = coid.getTypeParameters().stream().map(Object::toString).toList();
+            if (!coid.getExtendedTypes().isEmpty()) {
+                extendedType = resolveType(coid.getExtendedTypes().get(0), importMap, filePackage);
+            }
+            implementedTypes = coid.getImplementedTypes().stream()
+                    .map(t -> resolveType(t, importMap, filePackage)).toList();
+        } else if (typeDecl instanceof RecordDeclaration rd) {
+            typeParameters = rd.getTypeParameters().stream().map(Object::toString).toList();
+            implementedTypes = rd.getImplementedTypes().stream()
+                    .map(t -> resolveType(t, importMap, filePackage)).toList();
+        } else if (typeDecl instanceof EnumDeclaration ed) {
+            implementedTypes = ed.getImplementedTypes().stream()
+                    .map(t -> resolveType(t, importMap, filePackage)).toList();
+        }
+
+        List<FieldInfo> fields = typeDecl.getFields().stream()
+                .flatMap(fd -> extractFields(fd, importMap, filePackage).stream())
+                .toList();
+
+        List<MethodInfo> methods = new ArrayList<>();
+        typeDecl.getMethods().forEach(md -> methods.add(extractMethod(md, importMap, filePackage)));
+        typeDecl.getConstructors().forEach(cd -> methods.add(extractConstructor(cd, importMap, filePackage)));
+
+        // Record components — параметры record как псевдо-поля
+        if (typeDecl instanceof RecordDeclaration rd) {
+            List<FieldInfo> recordComponents = rd.getParameters().stream()
+                    .map(p -> new FieldInfo(
+                            extractAnnotations(p.getAnnotations()),
+                            List.of(),
+                            resolveType(p.getType(), importMap, filePackage),
+                            p.getNameAsString(),
+                            null))
+                    .toList();
+            List<FieldInfo> combined = new ArrayList<>(recordComponents);
+            combined.addAll(fields);
+            fields = combined;
+        }
+
+        // Вложенные классы: их пакет = qualifiedName родительского класса,
+        // но filePackage остаётся тем же — вложенные классы видят те же импорты
+        List<ClassStructure> nested = typeDecl.getMembers().stream()
+                .filter(m -> m instanceof TypeDeclaration)
+                .map(m -> buildClassStructure(
+                        (TypeDeclaration<?>) m, qualifiedName, importMap, filePackage, sourceFile, contextLevel))
+                .toList();
+
+        return new ClassStructure(
+                annotations, modifiers, kind, simpleName, qualifiedName,
+                typeParameters, extendedType, implementedTypes,
+                fields, methods, nested, sourceFile, contextLevel);
+    }
+
+    // -------------------------------------------------------------------------
+    // Private: fields, methods, constructors
+    // -------------------------------------------------------------------------
+
+    private List<FieldInfo> extractFields(FieldDeclaration fd, Map<String, String> importMap, String pkg) {
+        List<AnnotationInfo> annotations = extractAnnotations(fd.getAnnotations());
+        List<String> modifiers = extractModifiers(fd.getModifiers());
+        String type = resolveType(fd.getElementType(), importMap, pkg);
+        return fd.getVariables().stream()
+                .map(v -> new FieldInfo(
+                        annotations, modifiers, type, v.getNameAsString(),
+                        v.getInitializer().map(Expression::toString).orElse(null)))
+                .toList();
+    }
+
+    private MethodInfo extractMethod(MethodDeclaration md, Map<String, String> importMap, String pkg) {
+        return new MethodInfo(
+                extractAnnotations(md.getAnnotations()),
+                extractModifiers(md.getModifiers()),
+                resolveType(md.getType(), importMap, pkg),
+                md.getNameAsString(),
+                md.getTypeParameters().stream().map(Object::toString).toList(),
+                md.getParameters().stream()
+                        .map(p -> new ParameterInfo(
+                                extractAnnotations(p.getAnnotations()),
+                                resolveType(p.getType(), importMap, pkg),
+                                p.getNameAsString(), p.isVarArgs()))
+                        .toList(),
+                md.getThrownExceptions().stream()
+                        .map(e -> resolveType(e, importMap, pkg)).toList(),
+                false);
+    }
+
+    private MethodInfo extractConstructor(ConstructorDeclaration cd, Map<String, String> importMap, String pkg) {
+        return new MethodInfo(
+                extractAnnotations(cd.getAnnotations()),
+                extractModifiers(cd.getModifiers()),
+                null,
+                cd.getNameAsString(),
+                cd.getTypeParameters().stream().map(Object::toString).toList(),
+                cd.getParameters().stream()
+                        .map(p -> new ParameterInfo(
+                                extractAnnotations(p.getAnnotations()),
+                                resolveType(p.getType(), importMap, pkg),
+                                p.getNameAsString(), p.isVarArgs()))
+                        .toList(),
+                cd.getThrownExceptions().stream()
+                        .map(e -> resolveType(e, importMap, pkg)).toList(),
+                true);
+    }
+
+    // -------------------------------------------------------------------------
+    // Private: type resolution
+    // -------------------------------------------------------------------------
+
+    /**
+     * Резолвит тип в qualified name с трёхуровневой логикой:
+     * 1. explicit import map
+     * 2. тот же пакет (same-package) — если тип не встроенный и не java.*
+     * 3. simple name (встроенные, void, и т.д.)
+     */
+    private String resolveType(Type type, Map<String, String> importMap, String filePackage) {
+        String raw = type.asString();
+        String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
+        String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
+
+        // 1. explicit import
+        if (importMap.containsKey(base)) {
+            return importMap.get(base) + suffix;
+        }
+
+        // 2. same-package fallback: только для simple names (без точек),
+        //    не являющихся встроенными/java.*-типами
+        if (!base.contains(".") && !filePackage.isEmpty() && !isBuiltinOrJavaLangType(base)) {
+            return filePackage + "." + base + suffix;
+        }
+
+        // 3. возвращаем как есть (void, int, already-qualified)
+        return raw;
+    }
+
+    // -------------------------------------------------------------------------
+    // Private: helpers
+    // -------------------------------------------------------------------------
+
+    private List<AnnotationInfo> extractAnnotations(NodeList<AnnotationExpr> annotations) {
+        return annotations.stream()
+                .map(a -> new AnnotationInfo(a.getNameAsString(), extractAnnotationAttributes(a)))
+                .toList();
+    }
+
+    private Map<String, String> extractAnnotationAttributes(AnnotationExpr annotation) {
+        Map<String, String> attrs = new LinkedHashMap<>();
+        if (annotation instanceof NormalAnnotationExpr nae) {
+            nae.getPairs().forEach(pair -> attrs.put(pair.getNameAsString(), pair.getValue().toString()));
+        } else if (annotation instanceof SingleMemberAnnotationExpr smae) {
+            attrs.put("value", smae.getMemberValue().toString());
+        }
+        return attrs;
+    }
+
+    private List<String> extractModifiers(NodeList<com.github.javaparser.ast.Modifier> modifiers) {
+        return modifiers.stream().map(m -> m.getKeyword().asString()).toList();
+    }
+
+    private String detectKind(TypeDeclaration<?> typeDecl) {
+        if (typeDecl instanceof ClassOrInterfaceDeclaration coid) return coid.isInterface() ? "interface" : "class";
+        if (typeDecl instanceof EnumDeclaration) return "enum";
+        if (typeDecl instanceof AnnotationDeclaration) return "@interface";
+        if (typeDecl instanceof RecordDeclaration) return "record";
+        return "class";
     }
 
     private String stripGenerics(String type) {
@@ -267,15 +309,36 @@ public class JavaStructureParser {
         }
     }
 
-    private boolean isBuiltinType(String type) {
+    /**
+     * Фильтрует типы, которые не нужно искать в проекте:
+     * - примитивы, void, var
+     * - java.lang.* типы (String, Integer и т.д.) — только сами имена, без точек
+     * - типы java.* и javax.* (с точками)
+     * - массивы []
+     *
+     * Пользовательские qualified-типы (com.*, org.*, ru.* и т.д.) НЕ фильтруются.
+     */
+    private boolean isBuiltinOrJavaLangType(String type) {
         if (type == null || type.isBlank()) return true;
         return switch (type) {
+            // примитивы и void
             case "void", "int", "long", "double", "float", "boolean",
-                 "byte", "short", "char", "var", "Object", "String",
+                 "byte", "short", "char", "var" -> true;
+            // java.lang.* — simple names
+            case "Object", "String", "Number",
                  "Integer", "Long", "Double", "Float", "Boolean",
-                 "Byte", "Short", "Character", "Number" -> true;
-            default -> type.startsWith("java.") || type.startsWith("javax.")
-                    || type.endsWith("[]") || type.contains(".");
+                 "Byte", "Short", "Character",
+                 "StringBuilder", "StringBuffer",
+                 "Enum", "Record", "Throwable", "Exception", "RuntimeException",
+                 "Error", "Comparable", "Iterable",
+                 "Deprecated", "Override", "SuppressWarnings", "FunctionalInterface" -> true;
+            default ->
+                // java.* / javax.* / jakarta.* / sun.* qualified names
+                type.startsWith("java.") || type.startsWith("javax.")
+                || type.startsWith("jakarta.") || type.startsWith("sun.")
+                // массивы
+                || type.endsWith("[]");
+            // НАРОЧНО: пользовательские типы com.*, org.*, ru.* НЕ фильтруем!
         };
     }
 }
