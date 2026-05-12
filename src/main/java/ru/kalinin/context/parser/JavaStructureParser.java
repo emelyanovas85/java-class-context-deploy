@@ -33,6 +33,46 @@ public class JavaStructureParser {
 
     private final JavaParser parser;
 
+    /**
+     * Полный список simple-имён типов java.lang.*, которые не требуют явного import.
+     * Включает классы, интерфейсы, аннотации из java.lang и стандартные исключения.
+     */
+    private static final Set<String> JAVA_LANG_SIMPLE_NAMES = Set.of(
+            // Object hierarchy
+            "Object", "Enum", "Record",
+            // String / numeric wrappers
+            "String", "Number",
+            "Integer", "Long", "Double", "Float",
+            "Boolean", "Byte", "Short", "Character",
+            "StringBuilder", "StringBuffer",
+            // Functional
+            "Comparable", "Iterable", "Cloneable", "AutoCloseable", "Runnable",
+            "Thread", "ThreadLocal",
+            // Throwable hierarchy (java.lang.*)
+            "Throwable",
+            "Error",
+            "AssertionError", "LinkageError", "VirtualMachineError",
+            "Exception",
+            "CloneNotSupportedException", "InterruptedException",
+            "ReflectiveOperationException",
+            "RuntimeException",
+            "ArithmeticException", "ArrayIndexOutOfBoundsException",
+            "ArrayStoreException", "ClassCastException",
+            "ClassNotFoundException", "CloneNotSupportedException",
+            "EnumConstantNotPresentException", "IllegalAccessException",
+            "IllegalArgumentException", "IllegalMonitorStateException",
+            "IllegalStateException", "IllegalThreadStateException",
+            "IndexOutOfBoundsException", "InstantiationException",
+            "NegativeArraySizeException", "NoSuchFieldException",
+            "NoSuchMethodException", "NullPointerException",
+            "NumberFormatException", "SecurityException",
+            "StackOverflowError", "StringIndexOutOfBoundsException",
+            "TypeNotPresentException", "UnsupportedOperationException",
+            // annotations
+            "Deprecated", "Override", "SuppressWarnings",
+            "FunctionalInterface", "SafeVarargs"
+    );
+
     public JavaStructureParser() {
         ParserConfiguration config = new ParserConfiguration();
         config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
@@ -99,8 +139,6 @@ public class JavaStructureParser {
 
         cs.nestedClasses().forEach(nc -> types.addAll(collectReferencedTypes(nc)));
 
-        // Фильтруем встроенные типы и java.*-типы; пользовательские qualified типы (com.*,
-        // ru.* и т.д.) НЕ фильтруем — именно они нужны для построения следующего уровня.
         types.removeIf(this::isBuiltinOrJavaLangType);
         return types;
     }
@@ -113,7 +151,7 @@ public class JavaStructureParser {
             TypeDeclaration<?> typeDecl,
             String packageName,
             Map<String, String> importMap,
-            String filePackage,    // пакет файла — для fallback резольвинга типов того же пакета
+            String filePackage,
             String sourceFile,
             int contextLevel) {
 
@@ -152,7 +190,6 @@ public class JavaStructureParser {
         typeDecl.getMethods().forEach(md -> methods.add(extractMethod(md, importMap, filePackage)));
         typeDecl.getConstructors().forEach(cd -> methods.add(extractConstructor(cd, importMap, filePackage)));
 
-        // Record components — параметры record как псевдо-поля
         if (typeDecl instanceof RecordDeclaration rd) {
             List<FieldInfo> recordComponents = rd.getParameters().stream()
                     .map(p -> new FieldInfo(
@@ -167,8 +204,6 @@ public class JavaStructureParser {
             fields = combined;
         }
 
-        // Вложенные классы: их пакет = qualifiedName родительского класса,
-        // но filePackage остаётся тем же — вложенные классы видят те же импорты
         List<ClassStructure> nested = typeDecl.getMembers().stream()
                 .filter(m -> m instanceof TypeDeclaration)
                 .map(m -> buildClassStructure(
@@ -233,15 +268,12 @@ public class JavaStructureParser {
     }
 
     // -------------------------------------------------------------------------
-    // Private: type resolution
+    // Private: import map & type resolution
     // -------------------------------------------------------------------------
 
     /**
      * Строит карту simple name → qualified name из import-деклараций файла.
-     *
-     * <p>Обрабатывает только single-type imports (не wildcard): {@code import com.example.Foo}
-     * даёт запись {@code "Foo" → "com.example.Foo"}. Static imports игнорируются,
-     * так как они вводят имена методов/полей, а не типов.</p>
+     * Учитываются только single-type imports (не wildcard, не static).
      */
     private Map<String, String> buildImportMap(CompilationUnit cu) {
         Map<String, String> map = new LinkedHashMap<>();
@@ -258,28 +290,24 @@ public class JavaStructureParser {
     }
 
     /**
-     * Резолвит тип в qualified name с трёхуровневой логикой:
+     * Резолвит тип в qualified name:
      * 1. explicit import map
-     * 2. тот же пакет (same-package) — если тип не встроенный и не java.*
-     * 3. simple name (встроенные, void, и т.д.)
+     * 2. same-package fallback — только если тип не встроенный и не java.*
+     * 3. simple name (встроенные, void, already-qualified)
      */
     private String resolveType(Type type, Map<String, String> importMap, String filePackage) {
         String raw = type.asString();
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
 
-        // 1. explicit import
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
         }
 
-        // 2. same-package fallback: только для simple names (без точек),
-        //    не являющихся встроенными/java.*-типами
         if (!base.contains(".") && !filePackage.isEmpty() && !isBuiltinOrJavaLangType(base)) {
             return filePackage + "." + base + suffix;
         }
 
-        // 3. возвращаем как есть (void, int, already-qualified)
         return raw;
     }
 
@@ -331,35 +359,23 @@ public class JavaStructureParser {
     }
 
     /**
-     * Фильтрует типы, которые не нужно искать в проекте:
-     * - примитивы, void, var
-     * - java.lang.* типы (String, Integer и т.д.) — только сами имена, без точек
-     * - типы java.* и javax.* (с точками)
-     * - массивы []
+     * Тип является встроенным/java.lang.* если:
+     * - это примитив, void или var;
+     * - его simple name присутствует в {@link #JAVA_LANG_SIMPLE_NAMES};
+     * - его qualified name начинается с java.* / javax.* / jakarta.* / sun.*;
+     * - тип является массивом ([]).
      *
-     * Пользовательские qualified-типы (com.*, org.*, ru.* и т.д.) НЕ фильтруются.
+     * <p>Пользовательские типы (com.*, org.*, ru.* и т.д.) НЕ фильтруются.
      */
     private boolean isBuiltinOrJavaLangType(String type) {
         if (type == null || type.isBlank()) return true;
         return switch (type) {
-            // примитивы и void
             case "void", "int", "long", "double", "float", "boolean",
                  "byte", "short", "char", "var" -> true;
-            // java.lang.* — simple names
-            case "Object", "String", "Number",
-                 "Integer", "Long", "Double", "Float", "Boolean",
-                 "Byte", "Short", "Character",
-                 "StringBuilder", "StringBuffer",
-                 "Enum", "Record", "Throwable", "Exception", "RuntimeException",
-                 "Error", "Comparable", "Iterable",
-                 "Deprecated", "Override", "SuppressWarnings", "FunctionalInterface" -> true;
-            default ->
-                // java.* / javax.* / jakarta.* / sun.* qualified names
-                type.startsWith("java.") || type.startsWith("javax.")
-                || type.startsWith("jakarta.") || type.startsWith("sun.")
-                // массивы
-                || type.endsWith("[]");
-            // НАРОЧНО: пользовательские типы com.*, org.*, ru.* НЕ фильтруем!
+            default -> JAVA_LANG_SIMPLE_NAMES.contains(type)
+                    || type.startsWith("java.") || type.startsWith("javax.")
+                    || type.startsWith("jakarta.") || type.startsWith("sun.")
+                    || type.endsWith("[]");
         };
     }
 }
