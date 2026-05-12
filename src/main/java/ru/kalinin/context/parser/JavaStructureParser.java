@@ -237,6 +237,27 @@ public class JavaStructureParser {
     // -------------------------------------------------------------------------
 
     /**
+     * Строит карту simple name → qualified name из import-деклараций файла.
+     *
+     * <p>Обрабатывает только single-type imports (не wildcard): {@code import com.example.Foo}
+     * даёт запись {@code "Foo" → "com.example.Foo"}. Static imports игнорируются,
+     * так как они вводят имена методов/полей, а не типов.</p>
+     */
+    private Map<String, String> buildImportMap(CompilationUnit cu) {
+        Map<String, String> map = new LinkedHashMap<>();
+        for (ImportDeclaration imp : cu.getImports()) {
+            if (!imp.isAsterisk() && !imp.isStatic()) {
+                String qualified = imp.getNameAsString();
+                String simpleName = qualified.contains(".")
+                        ? qualified.substring(qualified.lastIndexOf('.') + 1)
+                        : qualified;
+                map.put(simpleName, qualified);
+            }
+        }
+        return map;
+    }
+
+    /**
      * Резолвит тип в qualified name с трёхуровневой логикой:
      * 1. explicit import map
      * 2. тот же пакет (same-package) — если тип не встроенный и не java.*
