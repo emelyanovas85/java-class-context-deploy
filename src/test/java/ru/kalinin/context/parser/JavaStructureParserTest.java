@@ -104,7 +104,7 @@ class JavaStructureParserTest {
         var findAll = cs.methods().stream()
                 .filter(m -> !m.isConstructor()).findFirst().orElseThrow();
         assertThat(findAll.name()).isEqualTo("findAll");
-        assertThat(findAll.returnType()).contains("List");
+        assertThat(findAll.returnType()).isEqualTo("java.util.List<String>");
         assertThat(findAll.thrownExceptions()).contains("IllegalStateException");
     }
 

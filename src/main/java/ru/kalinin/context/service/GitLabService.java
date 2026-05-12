@@ -37,10 +37,9 @@ public class GitLabService {
     // -------------------------------------------------------------------------
 
     /**
-     * Получить метаданные мёрж-реквеста.
+     * Получить метаданные мёрж-реквеста
      */
-    public MergeRequestInfo getMergeRequestInfo(
-            String gitlabUrl, String token, String projectId, long mrIid) {
+    public MergeRequestInfo getMergeRequestInfo(String gitlabUrl, String token, String projectId, long mrIid) {
 
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             MergeRequest mr = api.getMergeRequestApi()
@@ -83,11 +82,10 @@ public class GitLabService {
 
     /**
      * Прочитать содержимое файла из репозитория GitLab.
-     * Возвращает {@code Optional.empty()} если файл не найден или не java.
+     * Возвращает {@code Optional.empty()} если файл не найден или не java
      */
-    public Optional<String> readFileContent(
-            String gitlabUrl, String token, String projectId,
-            String branch, String filePath) {
+    public Optional<String> readFileContent(String gitlabUrl, String token, String projectId,
+                                            String branch, String filePath) {
 
         if (!filePath.endsWith(".java")) {
             return Optional.empty();
@@ -123,9 +121,8 @@ public class GitLabService {
      * @param qualifiedName полное имя класса, например {@code com.example.Foo}
      * @param branch        ветка
      */
-    public Optional<String> findJavaFileByQualifiedName(
-            String gitlabUrl, String token, String projectId,
-            String qualifiedName, String branch) {
+    public Optional<String> findJavaFileByQualifiedName(String gitlabUrl, String token, String projectId,
+                                                        String qualifiedName, String branch) {
 
         Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
 
@@ -175,27 +172,23 @@ public class GitLabService {
      * Возвращает индекс из кэша; если отсутствует — строит одним вызовом
      * {@code GET /projects/:id/repository/tree?recursive=true&per_page=100}.
      *
-     * <p>Ключ кэша: {@code projectId + "#" + branch}.
+     * <p>Ключ кэша: {@code projectId + "#" + branch}
      */
-    private Map<String, List<String>> getOrBuildIndex(
-            String gitlabUrl, String token, String projectId, String branch) {
-
+    private Map<String, List<String>> getOrBuildIndex(String gitlabUrl, String token, String projectId, String branch) {
         String cacheKey = projectId + "#" + branch;
         return fileIndexCache.computeIfAbsent(cacheKey,
                 k -> buildFileIndex(gitlabUrl, token, projectId, branch));
     }
 
     /**
-     * Строит индекс всех .java-файлов в репозитории.
+     * Строит индекс всех файлов в репозитории.
      *
      * <p>Использует {@code getTree()} gitlab4j с {@code recursive=true}.
      * gitlab4j сам обрабатывает пагинацию, поэтому просто забираем все страницы.
      *
-     * @return карта filename.java → [полные пути]
+     * @return карта filename → [полные пути]
      */
-    private Map<String, List<String>> buildFileIndex(
-            String gitlabUrl, String token, String projectId, String branch) {
-
+    private Map<String, List<String>> buildFileIndex(String gitlabUrl, String token, String projectId, String branch) {
         log.info("Building file index for project={} branch={}", projectId, branch);
         Map<String, List<String>> index = new HashMap<>();
 
@@ -207,8 +200,7 @@ public class GitLabService {
 
             while (pager.hasNext()) {
                 for (TreeItem item : pager.next()) {
-                    if (item.getType() == TreeItem.Type.BLOB
-                            && item.getName().endsWith(".java")) {
+                    if (item.getType() == TreeItem.Type.BLOB) {// && item.getName().endsWith(".java")) {
                         index.computeIfAbsent(item.getName(), k -> new ArrayList<>())
                              .add(item.getPath());
                     }

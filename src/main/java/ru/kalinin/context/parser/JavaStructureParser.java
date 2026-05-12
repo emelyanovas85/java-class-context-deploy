@@ -45,6 +45,13 @@ public class JavaStructureParser {
     // Public API
     // -------------------------------------------------------------------------
 
+    /**
+     * Парсит исходник и возвращает список структур всех классов верхнего уровня.
+     *
+     * @param sourceCode   содержимое .java файла
+     * @param sourceFile   путь к файлу (для метаданных)
+     * @param contextLevel уровень контекста (0 = изменённый, 1+ = зависимость)
+     */
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
         ParseResult<CompilationUnit> result = parser.parse(sourceCode);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
@@ -61,12 +68,14 @@ public class JavaStructureParser {
 
         List<ClassStructure> structures = new ArrayList<>();
         for (TypeDeclaration<?> typeDecl : cu.getTypes()) {
-            structures.add(buildClassStructure(
-                    typeDecl, packageName, importMap, packageName, sourceFile, contextLevel));
+            structures.add(buildClassStructure(typeDecl, packageName, importMap, packageName, sourceFile, contextLevel));
         }
         return structures;
     }
 
+    /**
+     * Собирает все типы, упомянутые в структуре класса (для построения следующего уровня контекста).
+     */
     public Set<String> collectReferencedTypes(ClassStructure cs) {
         Set<String> types = new LinkedHashSet<>();
 
@@ -100,14 +109,12 @@ public class JavaStructureParser {
     // Private: build structure
     // -------------------------------------------------------------------------
 
-    private ClassStructure buildClassStructure(
-            TypeDeclaration<?> typeDecl,
-            String packageName,
-            Map<String, String> importMap,
-            String filePackage,
-            String sourceFile,
-            int contextLevel) {
-
+    private ClassStructure buildClassStructure(TypeDeclaration<?> typeDecl,
+                                               String packageName,
+                                               Map<String, String> importMap,
+                                               String filePackage,
+                                               String sourceFile,
+                                               int contextLevel) {
         String simpleName = typeDecl.getNameAsString();
         String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
 
@@ -126,10 +133,12 @@ public class JavaStructureParser {
             }
             implementedTypes = coid.getImplementedTypes().stream()
                     .map(t -> resolveType(t, importMap, filePackage)).toList();
+
         } else if (typeDecl instanceof RecordDeclaration rd) {
             typeParameters = rd.getTypeParameters().stream().map(Object::toString).toList();
             implementedTypes = rd.getImplementedTypes().stream()
                     .map(t -> resolveType(t, importMap, filePackage)).toList();
+
         } else if (typeDecl instanceof EnumDeclaration ed) {
             implementedTypes = ed.getImplementedTypes().stream()
                     .map(t -> resolveType(t, importMap, filePackage)).toList();
@@ -160,8 +169,7 @@ public class JavaStructureParser {
         List<ClassStructure> nested = typeDecl.getMembers().stream()
                 .filter(m -> m instanceof TypeDeclaration)
                 .map(m -> buildClassStructure(
-                        (TypeDeclaration<?>) m, qualifiedName, importMap,
-                        filePackage, sourceFile, contextLevel))
+                        (TypeDeclaration<?>) m, qualifiedName, importMap, filePackage, sourceFile, contextLevel))
                 .toList();
 
         return new ClassStructure(
@@ -225,6 +233,10 @@ public class JavaStructureParser {
     // Private: import map & type resolution
     // -------------------------------------------------------------------------
 
+    /**
+     * Строит карту simple name → qualified name из import-деклараций файла.
+     * Учитываются только single-type imports (не wildcard, не static)
+     */
     private Map<String, String> buildImportMap(CompilationUnit cu) {
         Map<String, String> map = new LinkedHashMap<>();
         for (ImportDeclaration imp : cu.getImports()) {
@@ -239,6 +251,12 @@ public class JavaStructureParser {
         return map;
     }
 
+    /**
+     * Резолвит тип в qualified name:
+     * 1. explicit import map
+     * 2. same-package fallback — только если тип не встроенный и не java.*
+     * 3. simple name (встроенные, void, already-qualified)
+     */
     private String resolveType(Type type, Map<String, String> importMap, String filePackage) {
         String raw = type.asString();
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
@@ -268,8 +286,7 @@ public class JavaStructureParser {
     private Map<String, String> extractAnnotationAttributes(AnnotationExpr annotation) {
         Map<String, String> attrs = new LinkedHashMap<>();
         if (annotation instanceof NormalAnnotationExpr nae) {
-            nae.getPairs().forEach(pair ->
-                    attrs.put(pair.getNameAsString(), pair.getValue().toString()));
+            nae.getPairs().forEach(pair -> attrs.put(pair.getNameAsString(), pair.getValue().toString()));
         } else if (annotation instanceof SingleMemberAnnotationExpr smae) {
             attrs.put("value", smae.getMemberValue().toString());
         }
@@ -283,9 +300,12 @@ public class JavaStructureParser {
     private String detectKind(TypeDeclaration<?> typeDecl) {
         if (typeDecl instanceof ClassOrInterfaceDeclaration coid)
             return coid.isInterface() ? "interface" : "class";
-        if (typeDecl instanceof EnumDeclaration) return "enum";
-        if (typeDecl instanceof AnnotationDeclaration) return "@interface";
-        if (typeDecl instanceof RecordDeclaration) return "record";
+        if (typeDecl instanceof EnumDeclaration)
+            return "enum";
+        if (typeDecl instanceof AnnotationDeclaration)
+            return "@interface";
+        if (typeDecl instanceof RecordDeclaration)
+            return "record";
         return "class";
     }
 

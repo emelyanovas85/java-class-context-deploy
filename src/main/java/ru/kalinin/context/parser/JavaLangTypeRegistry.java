@@ -59,8 +59,8 @@ public final class JavaLangTypeRegistry {
                         //   без '$' — top-level)
                         .filter(r -> r.startsWith("java/lang/")
                                 && r.endsWith(".class")
-                                && !r.substring("java/lang/".length()).contains("/")
-                                && !r.contains("$"))
+                                && !r.substring("java/lang/".length()).contains("/"))
+                                //&& !r.contains("$"))
                         .forEach(r -> {
                             // java/lang/String.class → String
                             String simpleName = r

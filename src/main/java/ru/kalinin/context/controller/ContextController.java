@@ -40,8 +40,7 @@ public class ContextController {
      * </pre>
      */
     @PostMapping("/context")
-    public ResponseEntity<ContextResponse> getContext(
-            @Valid @RequestBody ContextRequest request) {
+    public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody ContextRequest request) {
 
         log.info("Building context for MR !{} in project '{}', depth={}",
                 request.mergeRequestIid(), request.projectId(), request.depth());

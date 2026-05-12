@@ -58,7 +58,7 @@ class StructureNodeMapperTest {
                 .filter(n -> "field".equals(n.type()))
                 .findFirst().orElseThrow();
         assertThat(field.signature()).contains("name");
-        assertThat(field.signature()).contains("@Value");
+        assertThat(field.signature()).contains("@org.springframework.beans.factory.annotation.Value");
         assertThat(field.rows()).isNotNull();
     }
 
