@@ -22,56 +22,18 @@ import java.util.*;
  * <ol>
  *   <li>explicit import: {@code import com.example.Foo} → {@code com.example.Foo}</li>
  *   <li>тот же пакет: если не найден в importMap и не является
- *       встроенным типом/java.*-типом,
- *       добавляет префикс пакета текущего файла</li>
+ *       встроенным/java.lang-типом, добавляет префикс пакета файла</li>
  *   <li>возвращает simple name как есть (встроенные, void и т.д.)</li>
  * </ol>
+ *
+ * <p>Множество java.lang-типов строится динамически через
+ * {@link JavaLangTypeRegistry#NAMES} — сканирует пакет через Module API.
  */
 @Slf4j
 @Component
 public class JavaStructureParser {
 
     private final JavaParser parser;
-
-    /**
-     * Полный список simple-имён типов java.lang.*, которые не требуют явного import.
-     * Включает классы, интерфейсы, аннотации из java.lang и стандартные исключения.
-     */
-    private static final Set<String> JAVA_LANG_SIMPLE_NAMES = Set.of(
-            // Object hierarchy
-            "Object", "Enum", "Record",
-            // String / numeric wrappers
-            "String", "Number",
-            "Integer", "Long", "Double", "Float",
-            "Boolean", "Byte", "Short", "Character",
-            "StringBuilder", "StringBuffer",
-            // Functional
-            "Comparable", "Iterable", "Cloneable", "AutoCloseable", "Runnable",
-            "Thread", "ThreadLocal",
-            // Throwable hierarchy (java.lang.*)
-            "Throwable",
-            "Error",
-            "AssertionError", "LinkageError", "VirtualMachineError",
-            "Exception",
-            "CloneNotSupportedException", "InterruptedException",
-            "ReflectiveOperationException",
-            "RuntimeException",
-            "ArithmeticException", "ArrayIndexOutOfBoundsException",
-            "ArrayStoreException", "ClassCastException",
-            "ClassNotFoundException", "CloneNotSupportedException",
-            "EnumConstantNotPresentException", "IllegalAccessException",
-            "IllegalArgumentException", "IllegalMonitorStateException",
-            "IllegalStateException", "IllegalThreadStateException",
-            "IndexOutOfBoundsException", "InstantiationException",
-            "NegativeArraySizeException", "NoSuchFieldException",
-            "NoSuchMethodException", "NullPointerException",
-            "NumberFormatException", "SecurityException",
-            "StackOverflowError", "StringIndexOutOfBoundsException",
-            "TypeNotPresentException", "UnsupportedOperationException",
-            // annotations
-            "Deprecated", "Override", "SuppressWarnings",
-            "FunctionalInterface", "SafeVarargs"
-    );
 
     public JavaStructureParser() {
         ParserConfiguration config = new ParserConfiguration();
@@ -83,13 +45,6 @@ public class JavaStructureParser {
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Парсит исходник и возвращает список структур всех классов верхнего уровня.
-     *
-     * @param sourceCode   содержимое .java файла
-     * @param sourceFile   путь к файлу (для метаданных)
-     * @param contextLevel уровень контекста (0 = изменённый, 1+ = зависимость)
-     */
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
         ParseResult<CompilationUnit> result = parser.parse(sourceCode);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
@@ -106,14 +61,12 @@ public class JavaStructureParser {
 
         List<ClassStructure> structures = new ArrayList<>();
         for (TypeDeclaration<?> typeDecl : cu.getTypes()) {
-            structures.add(buildClassStructure(typeDecl, packageName, importMap, packageName, sourceFile, contextLevel));
+            structures.add(buildClassStructure(
+                    typeDecl, packageName, importMap, packageName, sourceFile, contextLevel));
         }
         return structures;
     }
 
-    /**
-     * Собирает все типы, упомянутые в структуре класса (для построения следующего уровня контекста).
-     */
     public Set<String> collectReferencedTypes(ClassStructure cs) {
         Set<String> types = new LinkedHashSet<>();
 
@@ -207,7 +160,8 @@ public class JavaStructureParser {
         List<ClassStructure> nested = typeDecl.getMembers().stream()
                 .filter(m -> m instanceof TypeDeclaration)
                 .map(m -> buildClassStructure(
-                        (TypeDeclaration<?>) m, qualifiedName, importMap, filePackage, sourceFile, contextLevel))
+                        (TypeDeclaration<?>) m, qualifiedName, importMap,
+                        filePackage, sourceFile, contextLevel))
                 .toList();
 
         return new ClassStructure(
@@ -271,10 +225,6 @@ public class JavaStructureParser {
     // Private: import map & type resolution
     // -------------------------------------------------------------------------
 
-    /**
-     * Строит карту simple name → qualified name из import-деклараций файла.
-     * Учитываются только single-type imports (не wildcard, не static).
-     */
     private Map<String, String> buildImportMap(CompilationUnit cu) {
         Map<String, String> map = new LinkedHashMap<>();
         for (ImportDeclaration imp : cu.getImports()) {
@@ -289,12 +239,6 @@ public class JavaStructureParser {
         return map;
     }
 
-    /**
-     * Резолвит тип в qualified name:
-     * 1. explicit import map
-     * 2. same-package fallback — только если тип не встроенный и не java.*
-     * 3. simple name (встроенные, void, already-qualified)
-     */
     private String resolveType(Type type, Map<String, String> importMap, String filePackage) {
         String raw = type.asString();
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
@@ -324,7 +268,8 @@ public class JavaStructureParser {
     private Map<String, String> extractAnnotationAttributes(AnnotationExpr annotation) {
         Map<String, String> attrs = new LinkedHashMap<>();
         if (annotation instanceof NormalAnnotationExpr nae) {
-            nae.getPairs().forEach(pair -> attrs.put(pair.getNameAsString(), pair.getValue().toString()));
+            nae.getPairs().forEach(pair ->
+                    attrs.put(pair.getNameAsString(), pair.getValue().toString()));
         } else if (annotation instanceof SingleMemberAnnotationExpr smae) {
             attrs.put("value", smae.getMemberValue().toString());
         }
@@ -336,7 +281,8 @@ public class JavaStructureParser {
     }
 
     private String detectKind(TypeDeclaration<?> typeDecl) {
-        if (typeDecl instanceof ClassOrInterfaceDeclaration coid) return coid.isInterface() ? "interface" : "class";
+        if (typeDecl instanceof ClassOrInterfaceDeclaration coid)
+            return coid.isInterface() ? "interface" : "class";
         if (typeDecl instanceof EnumDeclaration) return "enum";
         if (typeDecl instanceof AnnotationDeclaration) return "@interface";
         if (typeDecl instanceof RecordDeclaration) return "record";
@@ -360,19 +306,17 @@ public class JavaStructureParser {
 
     /**
      * Тип является встроенным/java.lang.* если:
-     * - это примитив, void или var;
-     * - его simple name присутствует в {@link #JAVA_LANG_SIMPLE_NAMES};
-     * - его qualified name начинается с java.* / javax.* / jakarta.* / sun.*;
-     * - тип является массивом ([]).
-     *
-     * <p>Пользовательские типы (com.*, org.*, ru.* и т.д.) НЕ фильтруются.
+     * - примитив, void или var;
+     * - simple name есть в {@link JavaLangTypeRegistry#NAMES} (java.lang.*);
+     * - qualified name начинается с java.* / javax.* / jakarta.* / sun.*;
+     * - массив ([]).
      */
     private boolean isBuiltinOrJavaLangType(String type) {
         if (type == null || type.isBlank()) return true;
         return switch (type) {
             case "void", "int", "long", "double", "float", "boolean",
                  "byte", "short", "char", "var" -> true;
-            default -> JAVA_LANG_SIMPLE_NAMES.contains(type)
+            default -> JavaLangTypeRegistry.NAMES.contains(type)
                     || type.startsWith("java.") || type.startsWith("javax.")
                     || type.startsWith("jakarta.") || type.startsWith("sun.")
                     || type.endsWith("[]");
