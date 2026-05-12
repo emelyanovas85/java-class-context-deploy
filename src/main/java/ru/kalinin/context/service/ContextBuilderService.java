@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
+import ru.kalinin.context.parser.StructureNodeMapper;
 
 import java.util.*;
 
@@ -13,9 +14,11 @@ import java.util.*;
  *
  * <p>Алгоритм:
  * <ol>
- *   <li>Уровень 0: читаем изменённые .java файлы, парсим, строим {@link ClassStructure}.</li>
- *   <li>Уровень N (N ≥ 1): собираем все типы, упомянутые на уровне N-1,
- *       ищем их в репозитории GitLab, парсим и добавляем к результату.</li>
+ *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
+ *       для каждого строим пару structureSource / structureTarget
+ *       (structureTarget — тот же файл из target-ветки).</li>
+ *   <li>Уровень N (N ≥ 1): собираем все типы из уровня N-1,
+ *       ищем в репозитории, строим структуры только из source-ветки.</li>
  * </ol>
  */
 @Slf4j
@@ -25,24 +28,52 @@ public class ContextBuilderService {
 
     private final GitLabService gitLabService;
     private final JavaStructureParser structureParser;
+    private final StructureNodeMapper nodeMapper;
 
-    /**
-     * Точка входа: строит полный контекст.
-     */
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), request.mergeRequestIid());
 
-        String branch = mrInfo.sourceBranch();
+        String sourceBranch = mrInfo.sourceBranch();
+        String targetBranch = mrInfo.targetBranch();
 
-        List<ClassStructure> allClasses = new ArrayList<>();
+        List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
-        List<ClassStructure> level0 = parseFiles(
-                request, branch, mrInfo.changedFiles(), 0, processedQNames);
-        allClasses.addAll(level0);
+        // ── Уровень 0: изменённые файлы ─────────────────────────────────
+        List<ClassStructure> level0 = new ArrayList<>();
+        for (String filePath : mrInfo.changedFiles()) {
+            log.debug("Level 0: reading {}", filePath);
 
+            Optional<String> sourceContent = gitLabService.readFileContent(
+                    request.gitlabUrl(), request.token(),
+                    request.projectId(), sourceBranch, filePath);
+
+            Optional<String> targetContent = gitLabService.readFileContent(
+                    request.gitlabUrl(), request.token(),
+                    request.projectId(), targetBranch, filePath);
+
+            sourceContent.ifPresent(src -> {
+                List<ClassStructure> parsed = structureParser.parse(src, filePath, 0);
+                List<StructureNode> srcNodes = nodeMapper.map(src, filePath);
+                List<StructureNode> tgtNodes = targetContent
+                        .map(tgt -> nodeMapper.map(tgt, filePath))
+                        .orElse(null);
+
+                parsed.forEach(cs -> {
+                    if (!processedQNames.contains(cs.qualifiedName())) {
+                        processedQNames.add(cs.qualifiedName());
+                        level0.add(cs);
+                        addNestedQNames(cs, processedQNames);
+                        allContexts.add(new ChangedClassContext(
+                                cs.qualifiedName(), 0, srcNodes, tgtNodes));
+                    }
+                });
+            });
+        }
+
+        // ── Уровни 1..depth-1: зависимости ─────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth < request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
@@ -51,69 +82,54 @@ public class ContextBuilderService {
 
             log.debug("Depth {}: resolving {} referenced types", depth, referencedTypes.size());
 
-            List<String> filePaths = resolveTypesToFilePaths(request, branch, referencedTypes);
-
+            List<ClassStructure> nextLevel = new ArrayList<>();
             int finalDepth = depth;
-            List<ClassStructure> nextLevel = parseFiles(
-                    request, branch, filePaths, finalDepth, processedQNames);
-            allClasses.addAll(nextLevel);
+
+            for (String qName : referencedTypes) {
+                gitLabService.findJavaFileByQualifiedName(
+                        request.gitlabUrl(), request.token(),
+                        request.projectId(), qName, sourceBranch)
+                .flatMap(filePath -> gitLabService.readFileContent(
+                        request.gitlabUrl(), request.token(),
+                        request.projectId(), sourceBranch, filePath)
+                        .map(content -> Map.entry(filePath, content)))
+                .ifPresent(entry -> {
+                    String filePath = entry.getKey();
+                    String content  = entry.getValue();
+                    List<ClassStructure> parsed =
+                            structureParser.parse(content, filePath, finalDepth);
+                    List<StructureNode> nodes = nodeMapper.map(content, filePath);
+
+                    parsed.forEach(cs -> {
+                        if (!processedQNames.contains(cs.qualifiedName())) {
+                            processedQNames.add(cs.qualifiedName());
+                            nextLevel.add(cs);
+                            addNestedQNames(cs, processedQNames);
+                            allContexts.add(new ChangedClassContext(
+                                    cs.qualifiedName(), finalDepth, nodes, null));
+                        }
+                    });
+                });
+            }
+
             currentLevel = nextLevel;
         }
 
-        return new ContextResponse(mrInfo, allClasses, request.depth(), allClasses.size());
+        return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
-    private List<ClassStructure> parseFiles(
-            ContextRequest request, String branch,
-            List<String> filePaths, int contextLevel,
-            Set<String> processedQNames) {
+    // ── helpers ─────────────────────────────────────────────────────────────
 
-        List<ClassStructure> result = new ArrayList<>();
-        for (String filePath : filePaths) {
-            log.debug("Reading file: {}", filePath);
-            gitLabService.readFileContent(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), branch, filePath
-            ).ifPresent(content -> {
-                List<ClassStructure> parsed =
-                        structureParser.parse(content, filePath, contextLevel);
-                parsed.forEach(cs -> {
-                    if (!processedQNames.contains(cs.qualifiedName())) {
-                        processedQNames.add(cs.qualifiedName());
-                        result.add(cs);
-                        addNestedQNames(cs, processedQNames);
-                    }
-                });
-            });
-        }
-        return result;
-    }
-
-    private void addNestedQNames(ClassStructure cs, Set<String> processedQNames) {
+    private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {
-            processedQNames.add(nc.qualifiedName());
-            addNestedQNames(nc, processedQNames);
+            processed.add(nc.qualifiedName());
+            addNestedQNames(nc, processed);
         });
     }
 
     private Set<String> collectAllReferencedTypes(List<ClassStructure> classes) {
         Set<String> types = new LinkedHashSet<>();
-        for (ClassStructure cs : classes) {
-            types.addAll(structureParser.collectReferencedTypes(cs));
-        }
+        classes.forEach(cs -> types.addAll(structureParser.collectReferencedTypes(cs)));
         return types;
-    }
-
-    private List<String> resolveTypesToFilePaths(
-            ContextRequest request, String branch, Set<String> qualifiedNames) {
-
-        Set<String> resolvedPaths = new LinkedHashSet<>();
-        for (String qName : qualifiedNames) {
-            gitLabService.findJavaFileByQualifiedName(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), qName, branch
-            ).ifPresent(resolvedPaths::add);
-        }
-        return new ArrayList<>(resolvedPaths);
     }
 }
