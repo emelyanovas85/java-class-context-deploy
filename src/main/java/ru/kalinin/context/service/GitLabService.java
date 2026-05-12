@@ -6,19 +6,35 @@ import org.gitlab4j.api.GitLabApiException;
 import org.gitlab4j.api.models.Diff;
 import org.gitlab4j.api.models.MergeRequest;
 import org.gitlab4j.api.models.RepositoryFile;
+import org.gitlab4j.api.models.TreeItem;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.model.CommitInfo;
 import ru.kalinin.context.model.MergeRequestInfo;
 
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * Взаимодействие с GitLab через gitlab4j-api.
+ *
+ * <p>Для поиска файлов по qualified name используется файловый индекс,
+ * построенный одним запросом {@code repository/tree?recursive=true}
+ * при первом обращении к данному проекту+ветке.
+ * Индекс кэшируется в памяти по ключу projectId+branch.
  */
 @Slf4j
 @Service
 public class GitLabService {
+
+    /**
+     * Кэш: (projectId, branch) → индекс .java-файлов.
+     * Структура индекса: simpleName.java → List<fullPath>
+     * (list нужен на случай одноимённых файлов в разных пакетах)
+     */
+    private final Map<String, Map<String, List<String>>> fileIndexCache = new HashMap<>();
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
 
     /**
      * Получить метаданные мёрж-реквеста.
@@ -67,10 +83,7 @@ public class GitLabService {
 
     /**
      * Прочитать содержимое файла из репозитория GitLab.
-     * Возвращает Optional.empty() если файл не найден или не является Java-файлом.
-     *
-     * @param branch ветка или sha коммита
-     * @param filePath путь к файлу в репозитории
+     * Возвращает {@code Optional.empty()} если файл не найден или не java.
      */
     public Optional<String> readFileContent(
             String gitlabUrl, String token, String projectId,
@@ -97,45 +110,118 @@ public class GitLabService {
     }
 
     /**
-     * Найти Java-файл в проекте по qualified name класса.
-     * Пробует пути src/main/java/, src/test/java/, и корень репозитория.
+     * Найти путь к .java-файлу по qualified name класса.
      *
-     * @param qualifiedName полное имя класса, например com.example.Foo
+     * <p>Алгоритм:
+     * <ol>
+     *   <li>Получить (/ построить) индекс .java-файлов для данной ветки.</li>
+     *   <li>Извлечь simple name: {@code com.example.Foo} → {@code Foo.java}.</li>
+     *   <li>Найти путь в индексе, уточнить через package-суффикс если несколько падений.</li>
+     *   <li>Если не найдено — {@code Optional.empty()} (фоллбэк на simple name в вызывающем коде).</li>
+     * </ol>
+     *
+     * @param qualifiedName полное имя класса, например {@code com.example.Foo}
      * @param branch        ветка
-     * @return путь к файлу или Optional.empty()
      */
     public Optional<String> findJavaFileByQualifiedName(
             String gitlabUrl, String token, String projectId,
             String qualifiedName, String branch) {
 
-        String topLevelClass = qualifiedName.contains(".")
+        Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
+
+        // simple name файла: com.example.Foo → Foo.java
+        String simpleName = qualifiedName.contains(".")
                 ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
                 : qualifiedName;
-        if (topLevelClass.contains("$")) {
-            topLevelClass = topLevelClass.substring(0, topLevelClass.indexOf('$'));
+        // внутренние классы: Outer$Inner → ищем Outer.java
+        if (simpleName.contains("$")) {
+            simpleName = simpleName.substring(0, simpleName.indexOf('$'));
+        }
+        String fileName = simpleName + ".java";
+
+        List<String> candidates = index.getOrDefault(fileName, List.of());
+        if (candidates.isEmpty()) {
+            log.debug("No file found in index for class: {}", qualifiedName);
+            return Optional.empty();
         }
 
-        String packagePath = qualifiedName.contains(".")
-                ? qualifiedName.substring(0, qualifiedName.lastIndexOf('.')).replace('.', '/')
-                : "";
+        // если файл один — возвращаем сразу
+        if (candidates.size() == 1) {
+            return Optional.of(candidates.get(0));
+        }
 
-        String candidatePath = packagePath.isEmpty()
-                ? topLevelClass + ".java"
-                : packagePath + "/" + topLevelClass + ".java";
+        // несколько кандидатов: уточняем по package-суффиксу пути
+        // com.example.Foo → ищем файл, чей путь заканчивается на com/example/Foo.java
+        String packageSuffix = qualifiedName.replace('.', '/') + ".java";
+        Optional<String> exact = candidates.stream()
+                .filter(path -> path.endsWith(packageSuffix))
+                .findFirst();
+        if (exact.isPresent()) {
+            return exact;
+        }
 
-        for (String prefix : List.of("src/main/java/", "src/test/java/", "")) {
-            String fullPath = prefix + candidatePath;
-            try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
-                api.getRepositoryFileApi().getFile(projectId, fullPath, branch);
-                return Optional.of(fullPath);
-            } catch (GitLabApiException e) {
-                if (e.getHttpStatus() != 404) {
-                    log.warn("Error checking path {}: {}", fullPath, e.getMessage());
+        // если пакет не уточнил — берём первый (src/main/java предпочтительнее тестов)
+        Optional<String> mainFirst = candidates.stream()
+                .filter(p -> p.contains("src/main/java"))
+                .findFirst();
+        return mainFirst.isPresent() ? mainFirst : Optional.of(candidates.get(0));
+    }
+
+    // -------------------------------------------------------------------------
+    // Index
+    // -------------------------------------------------------------------------
+
+    /**
+     * Возвращает индекс из кэша; если отсутствует — строит одним вызовом
+     * {@code GET /projects/:id/repository/tree?recursive=true&per_page=100}.
+     *
+     * <p>Ключ кэша: {@code projectId + "#" + branch}.
+     */
+    private Map<String, List<String>> getOrBuildIndex(
+            String gitlabUrl, String token, String projectId, String branch) {
+
+        String cacheKey = projectId + "#" + branch;
+        return fileIndexCache.computeIfAbsent(cacheKey,
+                k -> buildFileIndex(gitlabUrl, token, projectId, branch));
+    }
+
+    /**
+     * Строит индекс всех .java-файлов в репозитории.
+     *
+     * <p>Использует {@code getTree()} gitlab4j с {@code recursive=true}.
+     * gitlab4j сам обрабатывает пагинацию, поэтому просто забираем все страницы.
+     *
+     * @return карта filename.java → [полные пути]
+     */
+    private Map<String, List<String>> buildFileIndex(
+            String gitlabUrl, String token, String projectId, String branch) {
+
+        log.info("Building file index for project={} branch={}", projectId, branch);
+        Map<String, List<String>> index = new HashMap<>();
+
+        try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
+            // getTree с recursive=true возвращает Pager;
+            // перебираем все страницы
+            var pager = api.getRepositoryApi()
+                    .getTree(projectId, null, branch, true, 100);
+
+            while (pager.hasNext()) {
+                for (TreeItem item : pager.next()) {
+                    if (item.getType() == TreeItem.Type.BLOB
+                            && item.getName().endsWith(".java")) {
+                        index.computeIfAbsent(item.getName(), k -> new ArrayList<>())
+                             .add(item.getPath());
+                    }
                 }
             }
+        } catch (GitLabApiException e) {
+            throw new RuntimeException(
+                    "Failed to build file index for " + projectId + "@" + branch
+                    + ": " + e.getMessage(), e);
         }
 
-        log.debug("Java file not found for class: {}", qualifiedName);
-        return Optional.empty();
+        log.info("File index built: {} unique filenames, project={} branch={}",
+                index.size(), projectId, branch);
+        return index;
     }
 }
