@@ -35,6 +35,9 @@ dependencies {
     // Jackson (уже в spring-boot-starter-web, явно для ясности)
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 
+    // Swagger UI / OpenAPI 3
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.8'
+
     // Тесты
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testCompileOnly 'org.projectlombok:lombok:1.18.36'
