@@ -99,7 +99,7 @@ public class GitLabService {
             return Optional.of(content);
         } catch (GitLabApiException e) {
             if (e.getHttpStatus() == 404) {
-                log.debug("File not found in GitLab: {}", filePath);
+//                log.debug("File not found in GitLab: {}", filePath);
                 return Optional.empty();
             }
             throw new RuntimeException(

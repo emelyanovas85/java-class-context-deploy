@@ -54,6 +54,12 @@ public class ContextBuilderService {
                     request.gitlabUrl(), request.token(),
                     request.projectId(), targetBranch, filePath);
 
+            if (sourceContent.isPresent() && targetContent.isEmpty())
+                log.debug("{} exists only in {} (just created)", filePath, sourceBranch);
+
+            if (sourceContent.isEmpty() && targetContent.isPresent())
+                log.debug("{} exists only in {} (just deleted)", filePath, targetContent);
+
             sourceContent.ifPresent(src -> {
                 List<ClassStructure> parsed = structureParser.parse(src, filePath, 0);
                 List<StructureNode> srcNodes = nodeMapper.map(src, filePath);
@@ -75,7 +81,7 @@ public class ContextBuilderService {
 
         // ── Уровни 1..depth-1: зависимости ─────────────────────────────
         List<ClassStructure> currentLevel = level0;
-        for (int depth = 1; depth < request.depth(); depth++) {
+        for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
             referencedTypes.removeAll(processedQNames);
             if (referencedTypes.isEmpty()) break;
@@ -89,7 +95,7 @@ public class ContextBuilderService {
                 gitLabService.findJavaFileByQualifiedName(
                         request.gitlabUrl(), request.token(),
                         request.projectId(), qName, sourceBranch)
-                .flatMap(filePath -> gitLabService.readFileContent(
+                .flatMap(filePath -> gitLabService.readFileContent(  // FIXME: почему только sourceBranch???
                         request.gitlabUrl(), request.token(),
                         request.projectId(), sourceBranch, filePath)
                         .map(content -> Map.entry(filePath, content)))
