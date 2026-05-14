@@ -23,4 +23,20 @@ public record StructureNode(
         String signature,
         String rows,
         List<StructureNode> children
-) {}
+) {
+    /**
+     * Псевдо-Markdown представление узла и всего его поддерева.
+     *
+     * <pre>
+     * |  23-88   |@SomeAnnotation
+     * |          |public class MyClass extends BaseClass
+     * |        25|    private final String name
+     * </pre>
+     *
+     * @see StructureNodePrinter
+     */
+    @Override
+    public String toString() {
+        return StructureNodePrinter.render(List.of(this), 0);
+    }
+}
