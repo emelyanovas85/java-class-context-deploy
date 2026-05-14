@@ -14,11 +14,13 @@ import java.util.*;
  *
  * <p>Алгоритм:
  * <ol>
+ *   <li>Сбор контекста зависимостей: получение списка известных классов
+ *       из зависимостей через sources.jar.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
- *       для каждого строим пару structureSource / structureTarget
- *       (structureTarget — тот же файл из target-ветки).</li>
- *   <li>Уровень N (N ≥ 1): собираем все типы из уровня N-1,
- *       ищем в репозитории, строим структуры только из source-ветки.</li>
+ *       для каждого строим пару structureSource / structureTarget.</li>
+ *   <li>Уровни N ≥ 1: собираем все типы из уровня N-1, ищем в репозитории,
+ *       строим структуры только из source-ветки.
+ *       Типы, известные из зависимостей, в резолвинг не идут.</li>
  * </ol>
  */
 @Slf4j
@@ -29,6 +31,7 @@ public class ContextBuilderService {
     private final GitLabService gitLabService;
     private final JavaStructureParser structureParser;
     private final StructureNodeMapper nodeMapper;
+    private final DependencyContextService dependencyContextService;
 
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
@@ -38,10 +41,16 @@ public class ContextBuilderService {
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
+        // ── Этап 0: сбор контекста зависимостей (перед резолвингом) ─────────────────────
+        Set<String> dependencyClassNames = dependencyContextService.collectDependencyClassNames(
+                request.gitlabUrl(), request.token(),
+                request.projectId(), sourceBranch);
+        log.info("Dependency context: {} known external class names", dependencyClassNames.size());
+
         List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
-        // ── Уровень 0: изменённые файлы ─────────────────────────────────
+        // ── Уровень 0: изменённые файлы ───────────────────────────────────────────────────
         List<ClassStructure> level0 = new ArrayList<>();
         for (String filePath : mrInfo.changedFiles()) {
             log.debug("Level 0: reading {}", filePath);
@@ -79,11 +88,13 @@ public class ContextBuilderService {
             });
         }
 
-        // ── Уровни 1..depth-1: зависимости ─────────────────────────────
+        // ── Уровни 1..depth-1: зависимости ─────────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
             referencedTypes.removeAll(processedQNames);
+            // Пропускаем типы, известные из зависимостей (они не находятся в репозитории)
+            referencedTypes.removeAll(dependencyClassNames);
             if (referencedTypes.isEmpty()) break;
 
             log.debug("Depth {}: resolving {} referenced types", depth, referencedTypes.size());
@@ -124,7 +135,7 @@ public class ContextBuilderService {
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────────
+    // ── helpers ─────────────────────────────────────────────────────────────────────────
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {

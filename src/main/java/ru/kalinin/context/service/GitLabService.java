@@ -25,8 +25,13 @@ import java.util.*;
 @Service
 public class GitLabService {
 
+    /** Имена файлов сборки, которые мы умеем обрабатывать. */
+    private static final Set<String> BUILD_FILE_NAMES = Set.of(
+            "build.gradle", "build.gradle.kts", "pom.xml"
+    );
+
     /**
-     * Кэш: (projectId, branch) → индекс .java-файлов.
+     * Кэш: (projectId, branch) → индекс файлов.
      * Структура индекса: simpleName.java → List<fullPath>
      * (list нужен на случай одноимённых файлов в разных пакетах)
      */
@@ -81,8 +86,8 @@ public class GitLabService {
     }
 
     /**
-     * Прочитать содержимое файла из репозитория GitLab.
-     * Возвращает {@code Optional.empty()} если файл не найден или не java
+     * Прочитать содержимое Java-файла из репозитория GitLab.
+     * Возвращает {@code Optional.empty()} если файл не найден или не .java
      */
     public Optional<String> readFileContent(String gitlabUrl, String token, String projectId,
                                             String branch, String filePath) {
@@ -90,7 +95,17 @@ public class GitLabService {
         if (!filePath.endsWith(".java")) {
             return Optional.empty();
         }
+        return readRawFileContent(gitlabUrl, token, projectId, branch, filePath);
+    }
 
+    /**
+     * Прочитать содержимое произвольного файла без проверки расширения.
+     * Используется для чтения файлов сборки (*.gradle, pom.xml и т.д.).
+     *
+     * @return содержимое файла или {@code Optional.empty()} если файл не найден (404)
+     */
+    public Optional<String> readRawFileContent(String gitlabUrl, String token, String projectId,
+                                               String branch, String filePath) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             RepositoryFile file = api.getRepositoryFileApi()
                     .getFile(projectId, filePath, branch);
@@ -99,7 +114,6 @@ public class GitLabService {
             return Optional.of(content);
         } catch (GitLabApiException e) {
             if (e.getHttpStatus() == 404) {
-//                log.debug("File not found in GitLab: {}", filePath);
                 return Optional.empty();
             }
             throw new RuntimeException(
@@ -108,15 +122,27 @@ public class GitLabService {
     }
 
     /**
-     * Найти путь к .java-файлу по qualified name класса.
+     * Найти все файлы сборки (build.gradle, build.gradle.kts, pom.xml)
+     * в репозитории GitLab для указанной ветки.
      *
-     * <p>Алгоритм:
-     * <ol>
-     *   <li>Получить (/ построить) индекс .java-файлов для данной ветки.</li>
-     *   <li>Извлечь simple name: {@code com.example.Foo} → {@code Foo.java}.</li>
-     *   <li>Найти путь в индексе, уточнить через package-суффикс если несколько падений.</li>
-     *   <li>Если не найдено — {@code Optional.empty()} (фоллбэк на simple name в вызывающем коде).</li>
-     * </ol>
+     * <p>Использует уже построенный индекс файлов (SharedWith {@link #findJavaFileByQualifiedName}).
+     *
+     * @return пути к файлам сборки относительно корня репозитория
+     */
+    public List<String> findBuildFiles(String gitlabUrl, String token,
+                                       String projectId, String branch) {
+        Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
+        List<String> result = new ArrayList<>();
+        for (String buildFileName : BUILD_FILE_NAMES) {
+            List<String> paths = index.getOrDefault(buildFileName, List.of());
+            result.addAll(paths);
+        }
+        log.debug("findBuildFiles project={} branch={}: found {}", projectId, branch, result);
+        return result;
+    }
+
+    /**
+     * Найти путь к .java-файлу по qualified name класса.
      *
      * @param qualifiedName полное имя класса, например {@code com.example.Foo}
      * @param branch        ветка
@@ -126,11 +152,9 @@ public class GitLabService {
 
         Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
 
-        // simple name файла: com.example.Foo → Foo.java
         String simpleName = qualifiedName.contains(".")
                 ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
                 : qualifiedName;
-        // внутренние классы: Outer$Inner → ищем Outer.java
         if (simpleName.contains("$")) {
             simpleName = simpleName.substring(0, simpleName.indexOf('$'));
         }
@@ -142,22 +166,16 @@ public class GitLabService {
             return Optional.empty();
         }
 
-        // если файл один — возвращаем сразу
         if (candidates.size() == 1) {
             return Optional.of(candidates.get(0));
         }
 
-        // несколько кандидатов: уточняем по package-суффиксу пути
-        // com.example.Foo → ищем файл, чей путь заканчивается на com/example/Foo.java
         String packageSuffix = qualifiedName.replace('.', '/') + ".java";
         Optional<String> exact = candidates.stream()
                 .filter(path -> path.endsWith(packageSuffix))
                 .findFirst();
-        if (exact.isPresent()) {
-            return exact;
-        }
+        if (exact.isPresent()) return exact;
 
-        // если пакет не уточнил — берём первый (src/main/java предпочтительнее тестов)
         Optional<String> mainFirst = candidates.stream()
                 .filter(p -> p.contains("src/main/java"))
                 .findFirst();
@@ -168,39 +186,23 @@ public class GitLabService {
     // Index
     // -------------------------------------------------------------------------
 
-    /**
-     * Возвращает индекс из кэша; если отсутствует — строит одним вызовом
-     * {@code GET /projects/:id/repository/tree?recursive=true&per_page=100}.
-     *
-     * <p>Ключ кэша: {@code projectId + "#" + branch}
-     */
     private Map<String, List<String>> getOrBuildIndex(String gitlabUrl, String token, String projectId, String branch) {
         String cacheKey = projectId + "#" + branch;
         return fileIndexCache.computeIfAbsent(cacheKey,
                 k -> buildFileIndex(gitlabUrl, token, projectId, branch));
     }
 
-    /**
-     * Строит индекс всех файлов в репозитории.
-     *
-     * <p>Использует {@code getTree()} gitlab4j с {@code recursive=true}.
-     * gitlab4j сам обрабатывает пагинацию, поэтому просто забираем все страницы.
-     *
-     * @return карта filename → [полные пути]
-     */
     private Map<String, List<String>> buildFileIndex(String gitlabUrl, String token, String projectId, String branch) {
         log.info("Building file index for project={} branch={}", projectId, branch);
         Map<String, List<String>> index = new HashMap<>();
 
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
-            // getTree с recursive=true возвращает Pager;
-            // перебираем все страницы
             var pager = api.getRepositoryApi()
                     .getTree(projectId, null, branch, true, 100);
 
             while (pager.hasNext()) {
                 for (TreeItem item : pager.next()) {
-                    if (item.getType() == TreeItem.Type.BLOB) {// && item.getName().endsWith(".java")) {
+                    if (item.getType() == TreeItem.Type.BLOB) {
                         index.computeIfAbsent(item.getName(), k -> new ArrayList<>())
                              .add(item.getPath());
                     }
