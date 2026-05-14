@@ -1,0 +1,123 @@
+package ru.kalinin.context.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import ru.kalinin.context.dependency.*;
+
+import java.util.*;
+
+/**
+ * Оркестрирует этап сбора контекста зависимостей.
+ *
+ * <p>Алгоритм:
+ * <ol>
+ *   <li>Получить список всех файлов проекта из GitLab (через индекс, уже есть в GitLabService).</li>
+ *   <li>Найти все файлы сборки (*.gradle / pom.xml).</li>
+ *   <li>Прочитать их содержимое.</li>
+ *   <li>Найти Artifactory URL в содержимом Gradle-файлов.</li>
+ *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
+ *   <li>Для каждой зависимости скачать *-sources.jar и извлечь имена классов.</li>
+ * </ol>
+ *
+ * <p>Результат — {@code Set<String>} qualified names всех классов из зависимостей.
+ * Эти имена используются в {@link ContextBuilderService} для пропуска резолвинга
+ * типов, которые заведомо относятся к внешним библиотекам.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DependencyContextService {
+
+    private final GitLabService gitLabService;
+    private final List<DependencyExtractor> extractors;
+    private final ArtifactorySourcesLoader sourcesLoader;
+    private final DependencyClassNameExtractor classNameExtractor;
+
+    /**
+     * Собирает имена классов из всех зависимостей проекта.
+     *
+     * @param gitlabUrl URL GitLab-инстанса
+     * @param token     токен доступа
+     * @param projectId идентификатор проекта
+     * @param branch    ветка (source branch из MR)
+     * @return множество qualified names классов из зависимостей
+     */
+    public Set<String> collectDependencyClassNames(
+            String gitlabUrl, String token, String projectId, String branch) {
+
+        log.info("Collecting dependency class names for project={} branch={}", projectId, branch);
+
+        // 1. Получить все пути файлов сборки в проекте
+        List<String> buildFilePaths = gitLabService.findBuildFiles(gitlabUrl, token, projectId, branch);
+        if (buildFilePaths.isEmpty()) {
+            log.warn("No build files found in project={} branch={}", projectId, branch);
+            return Set.of();
+        }
+        log.info("Found {} build file(s): {}", buildFilePaths.size(), buildFilePaths);
+
+        // 2. Прочитать содержимое всех найденных файлов сборки
+        Map<String, String> buildFileContents = new LinkedHashMap<>();
+        for (String path : buildFilePaths) {
+            gitLabService.readRawFileContent(gitlabUrl, token, projectId, branch, path)
+                    .ifPresent(content -> buildFileContents.put(path, content));
+        }
+
+        // 3. Найти Artifactory URL из Gradle-файлов
+        List<String> gradleContents = buildFileContents.entrySet().stream()
+                .filter(e -> e.getKey().endsWith(".gradle") || e.getKey().endsWith(".gradle.kts"))
+                .map(Map.Entry::getValue)
+                .toList();
+
+        Optional<String> artifactoryUrl = sourcesLoader.detectArtifactoryUrl(gradleContents);
+        if (artifactoryUrl.isEmpty()) {
+            log.warn("Artifactory URL not found — skipping dependency sources download");
+            return Set.of();
+        }
+
+        // 4. Извлечь зависимости с версиями
+        List<DependencyCoordinate> allDeps = new ArrayList<>();
+        for (Map.Entry<String, String> entry : buildFileContents.entrySet()) {
+            String fileName = entry.getKey().contains("/")
+                    ? entry.getKey().substring(entry.getKey().lastIndexOf('/') + 1)
+                    : entry.getKey();
+            String content = entry.getValue();
+
+            extractors.stream()
+                    .filter(e -> e.supports(fileName))
+                    .findFirst()
+                    .ifPresentOrElse(
+                            extractor -> {
+                                try {
+                                    List<DependencyCoordinate> deps = extractor.extract(content);
+                                    allDeps.addAll(deps);
+                                    log.debug("Extracted {} deps from {}", deps.size(), entry.getKey());
+                                } catch (UnsupportedOperationException ex) {
+                                    log.info("Extractor for {} not yet implemented, skipping", fileName);
+                                }
+                            },
+                            () -> log.debug("No extractor for file: {}", fileName)
+                    );
+        }
+
+        if (allDeps.isEmpty()) {
+            log.info("No versioned dependencies found");
+            return Set.of();
+        }
+        log.info("Total versioned dependencies to process: {}", allDeps.size());
+
+        // 5. Скачать sources.jar и извлечь имена классов
+        Set<String> allClassNames = new HashSet<>();
+        String baseUrl = artifactoryUrl.get();
+
+        for (DependencyCoordinate dep : allDeps) {
+            sourcesLoader.downloadSourcesJar(baseUrl, dep).ifPresent(jarBytes -> {
+                Set<String> names = classNameExtractor.extractClassNames(jarBytes, dep.toString());
+                allClassNames.addAll(names);
+            });
+        }
+
+        log.info("Total dependency class names collected: {}", allClassNames.size());
+        return Collections.unmodifiableSet(allClassNames);
+    }
+}
