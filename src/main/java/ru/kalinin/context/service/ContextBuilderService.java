@@ -3,6 +3,7 @@ package ru.kalinin.context.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
 import ru.kalinin.context.parser.StructureNodeMapper;
@@ -14,6 +15,7 @@ import java.util.*;
  *
  * <p>Алгоритм:
  * <ol>
+ *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
  *   <li>Сбор контекста зависимостей: получение списка известных классов
  *       из зависимостей через sources.jar.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
@@ -28,6 +30,9 @@ import java.util.*;
 @RequiredArgsConstructor
 public class ContextBuilderService {
 
+    /** Состояния MR, при которых анализ возможен. */
+    private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
+
     private final GitLabService gitLabService;
     private final JavaStructureParser structureParser;
     private final StructureNodeMapper nodeMapper;
@@ -38,6 +43,12 @@ public class ContextBuilderService {
                 request.gitlabUrl(), request.token(),
                 request.projectId(), request.mergeRequestIid());
 
+        // ── Проверка состояния MR ────────────────────────────────────────────────
+        if (!ANALYZABLE_STATES.contains(mrInfo.state())) {
+            throw new MergeRequestAlreadyMergedException(
+                    request.mergeRequestIid(), mrInfo.state());
+        }
+
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
@@ -47,7 +58,7 @@ public class ContextBuilderService {
                 request.projectId(), sourceBranch);
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
-        List<ClassContext> allContexts = new ArrayList<>();
+        List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -81,7 +92,7 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(ClassContext.of(
+                        allContexts.add(ChangedClassContext.of(
                                 cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
@@ -121,8 +132,7 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            // для зависимостей source и target совпадают — будет UnchangedClassContext
-                            allContexts.add(ClassContext.of(
+                            allContexts.add(ChangedClassContext.of(
                                     cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });
