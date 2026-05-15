@@ -36,10 +36,16 @@ import java.util.*;
 @Service
 public class GitLabService {
 
-    /** Имена файлов сборки, которые мы умеем обрабатывать. */
-    private static final Set<String> BUILD_FILE_NAMES = Set.of(
-            "build.gradle", "build.gradle.kts", "pom.xml"
+    /**
+     * Суффиксы файлов сборки.
+     * Читаются все *.gradle, *.gradle.kts и pom.xml,
+     * чтобы охватить allure.gradle, repositories.gradle и прочие
+     * включаемые конфигурации.
+     */
+    private static final List<String> BUILD_FILE_SUFFIXES = List.of(
+            ".gradle", ".gradle.kts"
     );
+    private static final String POM_XML = "pom.xml";
 
     // -------------------------------------------------------------------------
     // Public API
@@ -107,7 +113,7 @@ public class GitLabService {
 
     /**
      * Прочитать содержимое произвольного файла без проверки расширения.
-     * Используется для чтения файлов сборки (*.gradle, pom.xml и т.д.).
+     * Используется для чтения файлов сборки (*.gradle, *.gradle.kts, pom.xml и т.д.).
      *
      * @return содержимое файла или {@code Optional.empty()} если файл не найден (404)
      */
@@ -129,18 +135,26 @@ public class GitLabService {
     }
 
     /**
-     * Найти все файлы сборки (build.gradle, build.gradle.kts, pom.xml)
-     * в уже готовом индексе.
+     * Найти все файлы сборки в уже готовом индексе.
+     *
+     * <p>Читаются:
+     * <ul>
+     *   <li>все файлы *.gradle и *.gradle.kts — не только build.gradle,
+     *       но также allure.gradle, repositories.gradle и прочие;</li>
+     *   <li>pom.xml.</li>
+     * </ul>
      *
      * @param fileIndex мёрженный файловый индекс из {@link #buildMergedFileIndex}
      */
     public List<String> findBuildFiles(Map<String, List<String>> fileIndex) {
         List<String> result = new ArrayList<>();
-        for (String buildFileName : BUILD_FILE_NAMES) {
-            List<String> paths = fileIndex.getOrDefault(buildFileName, List.of());
-            result.addAll(paths);
+        for (Map.Entry<String, List<String>> entry : fileIndex.entrySet()) {
+            String name = entry.getKey();
+            if (isBuildFile(name)) {
+                result.addAll(entry.getValue());
+            }
         }
-        log.debug("findBuildFiles: found {}", result);
+        log.debug("findBuildFiles: found {} file(s): {}", result.size(), result);
         return result;
     }
 
@@ -247,6 +261,18 @@ public class GitLabService {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Проверяет, является ли файл файлом сборки.
+     * Считаются: *.gradle, *.gradle.kts, pom.xml.
+     */
+    static boolean isBuildFile(String name) {
+        if (POM_XML.equals(name)) return true;
+        for (String suffix : BUILD_FILE_SUFFIXES) {
+            if (name.endsWith(suffix)) return true;
+        }
+        return false;
+    }
 
     private static String fileName(String path) {
         int slash = path.lastIndexOf('/');
