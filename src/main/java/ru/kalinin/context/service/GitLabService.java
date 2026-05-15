@@ -16,10 +16,20 @@ import java.util.*;
 /**
  * Взаимодействие с GitLab через gitlab4j-api.
  *
- * <p>Для поиска файлов по qualified name используется файловый индекс,
- * построенный одним запросом {@code repository/tree?recursive=true}
- * при первом обращении к данному проекту+ветке.
- * Индекс кэшируется в памяти по ключу projectId+branch.
+ * <h2>Файловый индекс для резолвинга зависимостей</h2>
+ * <p>Индекс строится на основе <b>target-ветки</b> (один запрос
+ * {@code repository/tree?recursive=true}) с последующим наложением
+ * патча из diff MR:
+ * <ul>
+ *   <li>Добавленные файлы ({@code newFile=true}) — добавляются в индекс.</li>
+ *   <li>Удалённые файлы ({@code deletedFile=true}) — остаются в индексе
+ *       (намеренно: позволяет резолвить типы, которые удалены в source,
+ *       но на которые всё ещё есть ссылки).</li>
+ *   <li>Переименованные ({@code renamedFile=true}) — добавляется {@code newPath};
+ *       {@code oldPath} остаётся из target-индекса.</li>
+ *   <li>Изменённые — путь не меняется, индекс не трогается.</li>
+ * </ul>
+ * Индекс кэшируется в памяти по ключу projectId+sourceBranch+targetBranch.
  */
 @Slf4j
 @Service
@@ -31,21 +41,27 @@ public class GitLabService {
     );
 
     /**
-     * Кэш: (projectId, branch) → индекс файлов.
-     * Структура индекса: simpleName.java → List<fullPath>
-     * (list нужен на случай одноимённых файлов в разных пакетах)
+     * Кэш файловых индексов для резолвинга зависимостей.
+     * Ключ: "projectId#sourceBranch#targetBranch"
+     * Значение: simpleName.java → List<fullPath>
      */
-    private final Map<String, Map<String, List<String>>> fileIndexCache = new HashMap<>();
+    private final Map<String, Map<String, List<String>>> mergedIndexCache = new HashMap<>();
+
+    /**
+     * Кэш индексов отдельных веток (используется для findBuildFiles).
+     * Ключ: "projectId#branch"
+     */
+    private final Map<String, Map<String, List<String>>> branchIndexCache = new HashMap<>();
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
     /**
-     * Получить метаданные мёрж-реквеста
+     * Получить метаданные мёрж-реквеста.
      */
-    public MergeRequestInfo getMergeRequestInfo(String gitlabUrl, String token, String projectId, long mrIid) {
-
+    public MergeRequestInfo getMergeRequestInfo(String gitlabUrl, String token,
+                                                String projectId, long mrIid) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             MergeRequest mr = api.getMergeRequestApi()
                     .getMergeRequest(projectId, mrIid);
@@ -61,10 +77,12 @@ public class GitLabService {
                             c.getCreatedAt() != null ? c.getCreatedAt().toString() : null))
                     .toList();
 
-            List<String> changedFiles = api.getMergeRequestApi()
+            List<Diff> diffs = api.getMergeRequestApi()
                     .getMergeRequestChanges(projectId, mrIid)
-                    .getChanges()
-                    .stream()
+                    .getChanges();
+
+            // changedFiles — только не-удалённые .java файлы (для уровня 0)
+            List<String> changedFiles = diffs.stream()
                     .filter(d -> !d.getDeletedFile())
                     .map(Diff::getNewPath)
                     .filter(p -> p.endsWith(".java"))
@@ -78,7 +96,8 @@ public class GitLabService {
                     mr.getTargetBranch(),
                     mr.getAuthor() != null ? mr.getAuthor().getUsername() : null,
                     commits,
-                    changedFiles
+                    changedFiles,
+                    diffs
             );
         } catch (GitLabApiException e) {
             throw new RuntimeException("GitLab API error: " + e.getMessage(), e);
@@ -91,7 +110,6 @@ public class GitLabService {
      */
     public Optional<String> readFileContent(String gitlabUrl, String token, String projectId,
                                             String branch, String filePath) {
-
         if (!filePath.endsWith(".java")) {
             return Optional.empty();
         }
@@ -124,14 +142,10 @@ public class GitLabService {
     /**
      * Найти все файлы сборки (build.gradle, build.gradle.kts, pom.xml)
      * в репозитории GitLab для указанной ветки.
-     *
-     * <p>Использует уже построенный индекс файлов (SharedWith {@link #findJavaFileByQualifiedName}).
-     *
-     * @return пути к файлам сборки относительно корня репозитория
      */
     public List<String> findBuildFiles(String gitlabUrl, String token,
                                        String projectId, String branch) {
-        Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
+        Map<String, List<String>> index = getOrBuildBranchIndex(gitlabUrl, token, projectId, branch);
         List<String> result = new ArrayList<>();
         for (String buildFileName : BUILD_FILE_NAMES) {
             List<String> paths = index.getOrDefault(buildFileName, List.of());
@@ -144,13 +158,25 @@ public class GitLabService {
     /**
      * Найти путь к .java-файлу по qualified name класса.
      *
+     * <p>Использует мёрженный индекс: target-ветка + патч из diff MR.
+     * Это позволяет резолвить:
+     * <ul>
+     *   <li>классы, добавленные в source (есть в diff, нет в target);</li>
+     *   <li>классы, удалённые в source (нет в source, но есть в target —
+     *       на случай когда на удалённый тип ещё есть ссылки в коде).</li>
+     * </ul>
+     *
      * @param qualifiedName полное имя класса, например {@code com.example.Foo}
-     * @param branch        ветка
+     * @param sourceBranch  ветка с изменениями
+     * @param targetBranch  целевая ветка
+     * @param mrDiffs       список diff-записей MR (из {@link MergeRequestInfo#diffs()})
      */
-    public Optional<String> findJavaFileByQualifiedName(String gitlabUrl, String token, String projectId,
-                                                        String qualifiedName, String branch) {
-
-        Map<String, List<String>> index = getOrBuildIndex(gitlabUrl, token, projectId, branch);
+    public Optional<String> findJavaFileByQualifiedName(String gitlabUrl, String token,
+                                                        String projectId, String qualifiedName,
+                                                        String sourceBranch, String targetBranch,
+                                                        List<Diff> mrDiffs) {
+        Map<String, List<String>> index =
+                getOrBuildMergedIndex(gitlabUrl, token, projectId, sourceBranch, targetBranch, mrDiffs);
 
         String simpleName = qualifiedName.contains(".")
                 ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
@@ -162,7 +188,7 @@ public class GitLabService {
 
         List<String> candidates = index.getOrDefault(fileName, List.of());
         if (candidates.isEmpty()) {
-            log.debug("No file found in index for class: {}", qualifiedName);
+            log.debug("No file found in merged index for class: {}", qualifiedName);
             return Optional.empty();
         }
 
@@ -183,17 +209,68 @@ public class GitLabService {
     }
 
     // -------------------------------------------------------------------------
-    // Index
+    // Index — merged (target + MR diff patch)
     // -------------------------------------------------------------------------
 
-    private Map<String, List<String>> getOrBuildIndex(String gitlabUrl, String token, String projectId, String branch) {
-        String cacheKey = projectId + "#" + branch;
-        return fileIndexCache.computeIfAbsent(cacheKey,
-                k -> buildFileIndex(gitlabUrl, token, projectId, branch));
+    private Map<String, List<String>> getOrBuildMergedIndex(String gitlabUrl, String token,
+                                                             String projectId,
+                                                             String sourceBranch,
+                                                             String targetBranch,
+                                                             List<Diff> mrDiffs) {
+        String cacheKey = projectId + "#" + sourceBranch + "#" + targetBranch;
+        return mergedIndexCache.computeIfAbsent(cacheKey,
+                k -> buildMergedIndex(gitlabUrl, token, projectId, targetBranch, mrDiffs));
     }
 
-    private Map<String, List<String>> buildFileIndex(String gitlabUrl, String token, String projectId, String branch) {
-        log.info("Building file index for project={} branch={}", projectId, branch);
+    /**
+     * Строит мёрженный индекс:
+     * <ol>
+     *   <li>Базовый индекс из target-ветки.</li>
+     *   <li>Патч из diff MR: добавленные и переименованные файлы добавляются;
+     *       удалённые — намеренно остаются (см. Javadoc класса).</li>
+     * </ol>
+     */
+    private Map<String, List<String>> buildMergedIndex(String gitlabUrl, String token,
+                                                        String projectId, String targetBranch,
+                                                        List<Diff> mrDiffs) {
+        log.info("Building merged file index for project={} targetBranch={}", projectId, targetBranch);
+
+        // шаг 1: базовый индекс из target
+        Map<String, List<String>> index = new HashMap<>(buildRawIndex(gitlabUrl, token, projectId, targetBranch));
+
+        // шаг 2: патч из diff MR
+        for (Diff diff : mrDiffs) {
+            String path = diff.getNewPath();
+            if (path == null || !path.endsWith(".java")) continue;
+
+            if (diff.getNewFile() || diff.getRenamedFile()) {
+                // добавленный или переименованный — добавляем newPath
+                String name = fileName(path);
+                index.computeIfAbsent(name, k -> new ArrayList<>()).add(path);
+                log.debug("Merged index patch: +{} ({})",
+                        path, diff.getNewFile() ? "added" : "renamed");
+            }
+            // deletedFile=true и изменённые файлы — индекс не трогаем
+        }
+
+        log.info("Merged index built: {} unique filenames, project={}", index.size(), projectId);
+        return Collections.unmodifiableMap(index);
+    }
+
+    // -------------------------------------------------------------------------
+    // Index — single branch (used for findBuildFiles)
+    // -------------------------------------------------------------------------
+
+    private Map<String, List<String>> getOrBuildBranchIndex(String gitlabUrl, String token,
+                                                             String projectId, String branch) {
+        String cacheKey = projectId + "#" + branch;
+        return branchIndexCache.computeIfAbsent(cacheKey,
+                k -> buildRawIndex(gitlabUrl, token, projectId, branch));
+    }
+
+    private Map<String, List<String>> buildRawIndex(String gitlabUrl, String token,
+                                                     String projectId, String branch) {
+        log.info("Building raw file index for project={} branch={}", projectId, branch);
         Map<String, List<String>> index = new HashMap<>();
 
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
@@ -214,8 +291,17 @@ public class GitLabService {
                     + ": " + e.getMessage(), e);
         }
 
-        log.info("File index built: {} unique filenames, project={} branch={}",
+        log.info("Raw file index built: {} unique filenames, project={} branch={}",
                 index.size(), projectId, branch);
         return index;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private static String fileName(String path) {
+        int slash = path.lastIndexOf('/');
+        return slash >= 0 ? path.substring(slash + 1) : path;
     }
 }
