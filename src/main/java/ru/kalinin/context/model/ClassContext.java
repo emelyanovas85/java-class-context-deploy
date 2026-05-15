@@ -9,7 +9,7 @@ import java.util.Objects;
  * <p>Два варианта:
  * <ul>
  *   <li>{@link UnchangedClassContext} — source и target структуры идентичны,
- *       хранится одно поле {@code structure}.</li>
+ *       хранится одно поле {@code structureTarget}.</li>
  *   <li>{@link ModifiedClassContext} — структуры различаются либо одна из них null
  *       (файл создан/удалён/изменён).</li>
  * </ul>

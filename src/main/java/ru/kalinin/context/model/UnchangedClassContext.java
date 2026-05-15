@@ -8,19 +8,19 @@ import java.util.List;
 /**
  * Контекст класса, структура которого не изменилась между source и target.
  *
- * <p>Содержит одно поле {@code structure} вместо двух,
+ * <p>Содержит одно поле {@code structureTarget} вместо двух,
  * чтобы избежать дублирования данных в JSON-ответе.
  *
  * @param name      qualified name класса
  * @param level     уровень контекста
- * @param structure структура класса (одинакова в source и target)
+ * @param structureTarget структура класса (одинакова в source и target)
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @Schema(description = "Класс, структура которого не изменилась между source и target")
 public record UnchangedClassContext(
         String name,
         int level,
-        List<StructureNode> structure
+        List<StructureNode> structureTarget
 ) implements ClassContext {
 
     @Override
@@ -28,7 +28,7 @@ public record UnchangedClassContext(
         StringBuilder sb = new StringBuilder();
         String header = "### " + name + "  [level=" + level + "]";
         sb.append(header).append("  [unchanged]\n");
-        sb.append(StructureNodePrinter.render(structure, 0));
+        sb.append(StructureNodePrinter.render(structureTarget, 0));
         return sb.toString();
     }
 }

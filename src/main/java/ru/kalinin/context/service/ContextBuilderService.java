@@ -58,7 +58,7 @@ public class ContextBuilderService {
                 request.projectId(), sourceBranch);
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
-        List<ChangedClassContext> allContexts = new ArrayList<>();
+        List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -92,7 +92,7 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(ChangedClassContext.of(
+                        allContexts.add(ClassContext.of(
                                 cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
@@ -132,7 +132,7 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            allContexts.add(ChangedClassContext.of(
+                            allContexts.add(ClassContext.of(
                                     cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });

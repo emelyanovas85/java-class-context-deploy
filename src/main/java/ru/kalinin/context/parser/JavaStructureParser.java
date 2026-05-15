@@ -106,7 +106,7 @@ public class JavaStructureParser {
     }
 
     // -------------------------------------------------------------------------
-    // Private: build structure
+    // Private: build structureTarget
     // -------------------------------------------------------------------------
 
     private ClassStructure buildClassStructure(TypeDeclaration<?> typeDecl,
