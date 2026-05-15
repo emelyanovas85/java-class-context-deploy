@@ -22,19 +22,19 @@ import java.util.List;
  * <p>Пример вывода:
  * <pre>
  * ### path/to/File.java
- * |  23-88   |@SomeAnnotation
+ * |     23-88|@SomeAnnotation
  * |          |public class MyClass extends BaseClass
  * |        25|    private final String name
- * |  66-87   |    public static class InnerClass
- * |  68-77   |        @Order
+ * |     66-87|    public static class InnerClass
+ * |     68-77|        @Order
  * |          |        public String withName(String n)
  * </pre>
  */
 public final class StructureNodePrinter {
 
-    /** Ширина колонки с номерами строк (между двумя '|'). */
+    /** Ширина колонки с номерами строк (между двумя '|') */
     private static final int ROWS_WIDTH = 10;
-    /** Размер одного уровня отступа. */
+    /** Размер одного уровня отступа */
     private static final int INDENT_SIZE = 4;
 
     private StructureNodePrinter() {}
@@ -94,11 +94,8 @@ public final class StructureNodePrinter {
         if (rows == null || rows.isBlank()) {
             return " ".repeat(ROWS_WIDTH);
         }
-        // правое выравнивание: укорачиваем если длиннее поля
-        if (rows.length() >= ROWS_WIDTH) {
-            return rows.substring(0, ROWS_WIDTH);
-        }
-        return String.format("%" + ROWS_WIDTH + "s", rows);
+        int width = Math.max(rows.length(), ROWS_WIDTH);
+        return String.format("%" + width + "s", rows);
     }
 
     /**
