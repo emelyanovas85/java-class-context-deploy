@@ -18,6 +18,8 @@ import java.util.*;
  *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
  *   <li>Сбор контекста зависимостей: получение списка известных классов
  *       из зависимостей через sources.jar.</li>
+ *   <li>Построение мёрженного файлового индекса для резолвинга:
+ *       target-ветка + patch из diff MR.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
  *       для каждого строим пару structureSource / structureTarget.</li>
  *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
@@ -45,7 +47,6 @@ public class ContextBuilderService {
                 request.gitlabUrl(), request.token(),
                 request.projectId(), request.mergeRequestIid());
 
-        // ── Проверка состояния MR ────────────────────────────────────────────────
         if (!ANALYZABLE_STATES.contains(mrInfo.state())) {
             throw new MergeRequestAlreadyMergedException(
                     request.mergeRequestIid(), mrInfo.state());
@@ -54,17 +55,20 @@ public class ContextBuilderService {
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
-        // ── Этап 0: сбор контекста зависимостей (перед резолвингом) ──────────────────────
         Set<String> dependencyClassNames = dependencyContextService.collectDependencyClassNames(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), sourceBranch
         );
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
+        Map<String, List<String>> fileIndex = gitLabService.buildMergedFileIndex(
+                request.gitlabUrl(), request.token(),
+                request.projectId(), targetBranch, mrInfo.diffs()
+        );
+
         List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
-        // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
         List<ClassStructure> level0 = new ArrayList<>();
         for (String filePath : mrInfo.changedFiles()) {
             log.debug("Level 0: reading {}", filePath);
@@ -104,7 +108,6 @@ public class ContextBuilderService {
             });
         }
 
-        // ── Уровни 1..depth: зависимости ────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
@@ -118,37 +121,31 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
-                // Используем мёрженный индекс (target + patch из diff MR):
-                // это позволяет резолвить типы, добавленные в source
-                // и типы, удалённые в source но ещё существующие в target.
-                gitLabService.findJavaFileByQualifiedName(
-                        request.gitlabUrl(), request.token(),
-                        request.projectId(), qName,
-                        sourceBranch, targetBranch, mrInfo.diffs())
-                .flatMap(filePath -> gitLabService.readFileContent(
-                        // Классы уровня N≥1 — это зависимости, не входящие в diff MR.
-                        // Нам нужна только их текущая структура как контекст, а не их изменения.
-                        // Если зависимость сама изменилась в этом MR — она уже в changedFiles и обработана на уровне 0.
-                        request.gitlabUrl(), request.token(),
-                        request.projectId(), sourceBranch, filePath)
-                        .map(content -> Map.entry(filePath, content)))
-                .ifPresent(entry -> {
-                    String filePath = entry.getKey();
-                    String content  = entry.getValue();
-                    List<ClassStructure> parsed =
-                            structureParser.parse(content, filePath, finalDepth);
-                    List<StructureNode> nodes = nodeMapper.map(content, filePath);
+                gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
+                        .flatMap(filePath -> gitLabService.readFileContent(
+                                // Классы уровня N≥1 — это зависимости, не входящие в diff MR.
+                                // Нам нужна только их текущая структура как контекст, а не их изменения.
+                                // Если зависимость сама изменилась в этом MR — она уже в changedFiles и обработана на уровне 0.
+                                request.gitlabUrl(), request.token(),
+                                request.projectId(), sourceBranch, filePath)
+                                .map(content -> Map.entry(filePath, content)))
+                        .ifPresent(entry -> {
+                            String filePath = entry.getKey();
+                            String content = entry.getValue();
+                            List<ClassStructure> parsed =
+                                    structureParser.parse(content, filePath, finalDepth);
+                            List<StructureNode> nodes = nodeMapper.map(content, filePath);
 
-                    parsed.forEach(cs -> {
-                        if (!processedQNames.contains(cs.qualifiedName())) {
-                            processedQNames.add(cs.qualifiedName());
-                            nextLevel.add(cs);
-                            addNestedQNames(cs, processedQNames);
-                            allContexts.add(ChangedClassContext.of(
-                                    cs.qualifiedName(), finalDepth, nodes, nodes));
-                        }
-                    });
-                });
+                            parsed.forEach(cs -> {
+                                if (!processedQNames.contains(cs.qualifiedName())) {
+                                    processedQNames.add(cs.qualifiedName());
+                                    nextLevel.add(cs);
+                                    addNestedQNames(cs, processedQNames);
+                                    allContexts.add(ChangedClassContext.of(
+                                            cs.qualifiedName(), finalDepth, nodes, nodes));
+                                }
+                            });
+                        });
             }
 
             currentLevel = nextLevel;
@@ -156,8 +153,6 @@ public class ContextBuilderService {
 
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
-
-    // ── helpers ─────────────────────────────────────────────────────────────────────────────────────
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {

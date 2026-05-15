@@ -17,7 +17,7 @@ import java.util.*;
  * Взаимодействие с GitLab через gitlab4j-api.
  *
  * <h2>Файловый индекс для резолвинга зависимостей</h2>
- * <p>Индекс строится на основе <b>target-ветки</b> (один запрос
+ * <p>Мёрженный индекс строится на основе <b>target-ветки</b> (один запрос
  * {@code repository/tree?recursive=true}) с последующим наложением
  * патча из diff MR:
  * <ul>
@@ -29,7 +29,8 @@ import java.util.*;
  *       {@code oldPath} остаётся из target-индекса.</li>
  *   <li>Изменённые — путь не меняется, индекс не трогается.</li>
  * </ul>
- * Индекс кэшируется в памяти по ключу projectId+sourceBranch+targetBranch.
+ * Индекс не кэшируется в поле сервиса: он строится один раз в рамках buildContext()
+ * и передаётся дальше как локальная переменная.
  */
 @Slf4j
 @Service
@@ -39,19 +40,6 @@ public class GitLabService {
     private static final Set<String> BUILD_FILE_NAMES = Set.of(
             "build.gradle", "build.gradle.kts", "pom.xml"
     );
-
-    /**
-     * Кэш файловых индексов для резолвинга зависимостей.
-     * Ключ: "projectId#sourceBranch#targetBranch"
-     * Значение: simpleName.java → List<fullPath>
-     */
-    private final Map<String, Map<String, List<String>>> mergedIndexCache = new HashMap<>();
-
-    /**
-     * Кэш индексов отдельных веток (используется для findBuildFiles).
-     * Ключ: "projectId#branch"
-     */
-    private final Map<String, Map<String, List<String>>> branchIndexCache = new HashMap<>();
 
     // -------------------------------------------------------------------------
     // Public API
@@ -85,6 +73,7 @@ public class GitLabService {
             List<String> changedFiles = diffs.stream()
                     .filter(d -> !d.getDeletedFile())
                     .map(Diff::getNewPath)
+                    .filter(Objects::nonNull)
                     .filter(p -> p.endsWith(".java"))
                     .toList();
 
@@ -145,7 +134,7 @@ public class GitLabService {
      */
     public List<String> findBuildFiles(String gitlabUrl, String token,
                                        String projectId, String branch) {
-        Map<String, List<String>> index = getOrBuildBranchIndex(gitlabUrl, token, projectId, branch);
+        Map<String, List<String>> index = buildRawIndex(gitlabUrl, token, projectId, branch);
         List<String> result = new ArrayList<>();
         for (String buildFileName : BUILD_FILE_NAMES) {
             List<String> paths = index.getOrDefault(buildFileName, List.of());
@@ -156,28 +145,44 @@ public class GitLabService {
     }
 
     /**
-     * Найти путь к .java-файлу по qualified name класса.
+     * Построить мёрженный индекс для резолвинга зависимостей.
      *
-     * <p>Использует мёрженный индекс: target-ветка + патч из diff MR.
-     * Это позволяет резолвить:
-     * <ul>
-     *   <li>классы, добавленные в source (есть в diff, нет в target);</li>
-     *   <li>классы, удалённые в source (нет в source, но есть в target —
-     *       на случай когда на удалённый тип ещё есть ссылки в коде).</li>
-     * </ul>
-     *
-     * @param qualifiedName полное имя класса, например {@code com.example.Foo}
-     * @param sourceBranch  ветка с изменениями
-     * @param targetBranch  целевая ветка
-     * @param mrDiffs       список diff-записей MR (из {@link MergeRequestInfo#diffs()})
+     * <p>Базой служит target-ветка, затем поверх неё накладывается patch из diff MR.
+     * Получившийся индекс можно использовать в рамках одного buildContext().
      */
-    public Optional<String> findJavaFileByQualifiedName(String gitlabUrl, String token,
-                                                        String projectId, String qualifiedName,
-                                                        String sourceBranch, String targetBranch,
-                                                        List<Diff> mrDiffs) {
-        Map<String, List<String>> index =
-                getOrBuildMergedIndex(gitlabUrl, token, projectId, sourceBranch, targetBranch, mrDiffs);
+    public Map<String, List<String>> buildMergedFileIndex(String gitlabUrl, String token,
+                                                          String projectId, String targetBranch,
+                                                          List<Diff> mrDiffs) {
+        log.info("Building merged file index for project={} targetBranch={}", projectId, targetBranch);
 
+        Map<String, List<String>> index = new HashMap<>(buildRawIndex(gitlabUrl, token, projectId, targetBranch));
+
+        for (Diff diff : mrDiffs) {
+            String path = diff.getNewPath();
+            if (path == null || !path.endsWith(".java")) continue;
+
+            if (diff.getNewFile() || diff.getRenamedFile()) {
+                String name = fileName(path);
+                index.computeIfAbsent(name, k -> new ArrayList<>()).add(path);
+                log.debug("Merged index patch: +{} ({})",
+                        path, diff.getNewFile() ? "added" : "renamed");
+            }
+            // deletedFile=true и изменённые файлы — индекс не трогаем:
+            // удалённые должны оставаться доступными из target.
+        }
+
+        log.info("Merged index built: {} unique filenames, project={}", index.size(), projectId);
+        return Collections.unmodifiableMap(index);
+    }
+
+    /**
+     * Найти путь к .java-файлу по qualified name класса в уже построенном индексе.
+     *
+     * @param index         мёрженный индекс из {@link #buildMergedFileIndex}
+     * @param qualifiedName полное имя класса, например {@code com.example.Foo}
+     */
+    public Optional<String> findJavaFileByQualifiedName(Map<String, List<String>> index,
+                                                        String qualifiedName) {
         String simpleName = qualifiedName.contains(".")
                 ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
                 : qualifiedName;
@@ -209,67 +214,11 @@ public class GitLabService {
     }
 
     // -------------------------------------------------------------------------
-    // Index — merged (target + MR diff patch)
+    // Internal index building
     // -------------------------------------------------------------------------
-
-    private Map<String, List<String>> getOrBuildMergedIndex(String gitlabUrl, String token,
-                                                             String projectId,
-                                                             String sourceBranch,
-                                                             String targetBranch,
-                                                             List<Diff> mrDiffs) {
-        String cacheKey = projectId + "#" + sourceBranch + "#" + targetBranch;
-        return mergedIndexCache.computeIfAbsent(cacheKey,
-                k -> buildMergedIndex(gitlabUrl, token, projectId, targetBranch, mrDiffs));
-    }
-
-    /**
-     * Строит мёрженный индекс:
-     * <ol>
-     *   <li>Базовый индекс из target-ветки.</li>
-     *   <li>Патч из diff MR: добавленные и переименованные файлы добавляются;
-     *       удалённые — намеренно остаются (см. Javadoc класса).</li>
-     * </ol>
-     */
-    private Map<String, List<String>> buildMergedIndex(String gitlabUrl, String token,
-                                                        String projectId, String targetBranch,
-                                                        List<Diff> mrDiffs) {
-        log.info("Building merged file index for project={} targetBranch={}", projectId, targetBranch);
-
-        // шаг 1: базовый индекс из target
-        Map<String, List<String>> index = new HashMap<>(buildRawIndex(gitlabUrl, token, projectId, targetBranch));
-
-        // шаг 2: патч из diff MR
-        for (Diff diff : mrDiffs) {
-            String path = diff.getNewPath();
-            if (path == null || !path.endsWith(".java")) continue;
-
-            if (diff.getNewFile() || diff.getRenamedFile()) {
-                // добавленный или переименованный — добавляем newPath
-                String name = fileName(path);
-                index.computeIfAbsent(name, k -> new ArrayList<>()).add(path);
-                log.debug("Merged index patch: +{} ({})",
-                        path, diff.getNewFile() ? "added" : "renamed");
-            }
-            // deletedFile=true и изменённые файлы — индекс не трогаем
-        }
-
-        log.info("Merged index built: {} unique filenames, project={}", index.size(), projectId);
-        return Collections.unmodifiableMap(index);
-    }
-
-    // -------------------------------------------------------------------------
-    // Index — single branch (used for findBuildFiles)
-    // -------------------------------------------------------------------------
-
-    private Map<String, List<String>> getOrBuildBranchIndex(String gitlabUrl, String token,
-                                                             String projectId, String branch) {
-        String cacheKey = projectId + "#" + branch;
-        return branchIndexCache.computeIfAbsent(cacheKey,
-                k -> buildRawIndex(gitlabUrl, token, projectId, branch));
-    }
 
     private Map<String, List<String>> buildRawIndex(String gitlabUrl, String token,
-                                                     String projectId, String branch) {
+                                                    String projectId, String branch) {
         log.info("Building raw file index for project={} branch={}", projectId, branch);
         Map<String, List<String>> index = new HashMap<>();
 
@@ -281,14 +230,14 @@ public class GitLabService {
                 for (TreeItem item : pager.next()) {
                     if (item.getType() == TreeItem.Type.BLOB) {
                         index.computeIfAbsent(item.getName(), k -> new ArrayList<>())
-                             .add(item.getPath());
+                                .add(item.getPath());
                     }
                 }
             }
         } catch (GitLabApiException e) {
             throw new RuntimeException(
                     "Failed to build file index for " + projectId + "@" + branch
-                    + ": " + e.getMessage(), e);
+                            + ": " + e.getMessage(), e);
         }
 
         log.info("Raw file index built: {} unique filenames, project={} branch={}",
