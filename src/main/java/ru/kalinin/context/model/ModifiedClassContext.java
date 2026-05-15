@@ -21,7 +21,7 @@ public record ModifiedClassContext(
         int level,
         List<StructureNode> structureSource,
         List<StructureNode> structureTarget
-) implements ChangedClassContext {
+) implements ClassContext {
 
     @Override
     public String toString() {

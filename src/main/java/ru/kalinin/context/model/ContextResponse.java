@@ -13,7 +13,7 @@ import java.util.List;
  */
 public record ContextResponse(
         MergeRequestInfo mergeRequest,
-        List<ChangedClassContext> classes,
+        List<ClassContext> classes,
         int requestedDepth,
         int totalClassesAnalyzed
 ) {}

@@ -15,6 +15,9 @@ import ru.kalinin.context.model.ContextRequest;
 import ru.kalinin.context.model.ContextResponse;
 import ru.kalinin.context.service.ContextBuilderService;
 
+import java.time.Duration;
+import java.time.Instant;
+
 @Slf4j
 @RestController
 @RequestMapping("/api")
@@ -57,8 +60,9 @@ public class ContextController {
     public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody ContextRequest request) {
         log.info("Building context for MR !{} in project '{}', depth={}",
                 request.mergeRequestIid(), request.projectId(), request.depth());
+        Instant start = Instant.now();
         ContextResponse response = contextBuilderService.buildContext(request);
-        log.info("Context built: {} classes analyzed", response.totalClassesAnalyzed());
+        log.info("Context built: {} classes analyzed   {} ms", response.totalClassesAnalyzed(), Duration.between(start, Instant.now()).toMillis());
         return ResponseEntity.ok(response);
     }
 }

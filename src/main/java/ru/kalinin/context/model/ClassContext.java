@@ -16,7 +16,7 @@ import java.util.Objects;
  *
  * <p>Используйте фабрику {@link #of} вместо прямого создания.
  */
-public sealed interface ChangedClassContext
+public sealed interface ClassContext
         permits UnchangedClassContext, ModifiedClassContext {
 
     /** qualified name класса, например {@code com.example.Foo}. */
@@ -38,9 +38,9 @@ public sealed interface ChangedClassContext
      * @param structureSource  структура source-ветки (null — файл удалён)
      * @param structureTarget  структура target-ветки (null — файл создан)
      */
-    static ChangedClassContext of(String name, int level,
-                                  List<StructureNode> structureSource,
-                                  List<StructureNode> structureTarget) {
+    static ClassContext of(String name, int level,
+                           List<StructureNode> structureSource,
+                           List<StructureNode> structureTarget) {
         if (structureSource != null
                 && structureTarget != null
                 && Objects.equals(structureSource, structureTarget)) {
