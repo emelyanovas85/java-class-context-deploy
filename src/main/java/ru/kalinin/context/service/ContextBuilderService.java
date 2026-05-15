@@ -22,8 +22,8 @@ import java.util.*;
  *       для каждого строим пару structureSource / structureTarget.</li>
  *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
  *       Читаем только из source-ветки: нас интересует их текущая структура
- *       как контекст, а не их изменения — если зависимость сама изменилась
- *       в этом MR, она уже попала в changedFiles и обработана на уровне 0.
+ *       как контекст, а не их изменения. Если зависимость сама изменилась
+ *       в этом MR — она уже в changedFiles и обработана на уровне 0.
  *       Типы, известные из зависимостей, в резолвинг не идут.</li>
  * </ol>
  */
@@ -32,7 +32,7 @@ import java.util.*;
 @RequiredArgsConstructor
 public class ContextBuilderService {
 
-    /** Состояния MR, при которых анал–из возможен. */
+    /** Состояния MR, при которых анализ возможен. */
     private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
 
     private final GitLabService gitLabService;
@@ -104,7 +104,7 @@ public class ContextBuilderService {
             });
         }
 
-        // ── Уровни 1..depth: зависимости ──────────────────────────────────────
+        // ── Уровни 1..depth: зависимости ────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
@@ -118,9 +118,13 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
+                // Используем мёрженный индекс (target + patch из diff MR):
+                // это позволяет резолвить типы, добавленные в source
+                // и типы, удалённые в source но ещё существующие в target.
                 gitLabService.findJavaFileByQualifiedName(
                         request.gitlabUrl(), request.token(),
-                        request.projectId(), qName, sourceBranch)
+                        request.projectId(), qName,
+                        sourceBranch, targetBranch, mrInfo.diffs())
                 .flatMap(filePath -> gitLabService.readFileContent(
                         // Классы уровня N≥1 — это зависимости, не входящие в diff MR.
                         // Нам нужна только их текущая структура как контекст, а не их изменения.

@@ -1,5 +1,7 @@
 package ru.kalinin.context.model;
 
+import org.gitlab4j.api.models.Diff;
+
 import java.util.List;
 
 /**
@@ -12,7 +14,8 @@ import java.util.List;
  * @param targetBranch   целевая ветка
  * @param authorUsername логин автора
  * @param commits        список коммитов
- * @param changedFiles   пути к изменённым .java-файлам
+ * @param changedFiles   пути к не-удалённым .java-файлам MR (для уровня 0)
+ * @param diffs          полный список diff-записей MR (для построения индекса)
  */
 public record MergeRequestInfo(
         Long iid,
@@ -22,5 +25,6 @@ public record MergeRequestInfo(
         String targetBranch,
         String authorUsername,
         List<CommitInfo> commits,
-        List<String> changedFiles
+        List<String> changedFiles,
+        List<Diff> diffs
 ) {}
