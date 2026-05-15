@@ -130,17 +130,17 @@ public class GitLabService {
 
     /**
      * Найти все файлы сборки (build.gradle, build.gradle.kts, pom.xml)
-     * в репозитории GitLab для указанной ветки.
+     * в уже готовом индексе.
+     *
+     * @param fileIndex мёрженный файловый индекс из {@link #buildMergedFileIndex}
      */
-    public List<String> findBuildFiles(String gitlabUrl, String token,
-                                       String projectId, String branch) {
-        Map<String, List<String>> index = buildRawIndex(gitlabUrl, token, projectId, branch);
+    public List<String> findBuildFiles(Map<String, List<String>> fileIndex) {
         List<String> result = new ArrayList<>();
         for (String buildFileName : BUILD_FILE_NAMES) {
-            List<String> paths = index.getOrDefault(buildFileName, List.of());
+            List<String> paths = fileIndex.getOrDefault(buildFileName, List.of());
             result.addAll(paths);
         }
-        log.debug("findBuildFiles project={} branch={}: found {}", projectId, branch, result);
+        log.debug("findBuildFiles: found {}", result);
         return result;
     }
 
@@ -148,7 +148,8 @@ public class GitLabService {
      * Построить мёрженный индекс для резолвинга зависимостей.
      *
      * <p>Базой служит target-ветка, затем поверх неё накладывается patch из diff MR.
-     * Получившийся индекс можно использовать в рамках одного buildContext().
+     * Получившийся индекс используется в рамках одного buildContext()
+     * и передаётся дальше как локальная переменная.
      */
     public Map<String, List<String>> buildMergedFileIndex(String gitlabUrl, String token,
                                                           String projectId, String targetBranch,
@@ -167,8 +168,6 @@ public class GitLabService {
                 log.debug("Merged index patch: +{} ({})",
                         path, diff.getNewFile() ? "added" : "renamed");
             }
-            // deletedFile=true и изменённые файлы — индекс не трогаем:
-            // удалённые должны оставаться доступными из target.
         }
 
         log.info("Merged index built: {} unique filenames, project={}", index.size(), projectId);
@@ -178,10 +177,10 @@ public class GitLabService {
     /**
      * Найти путь к .java-файлу по qualified name класса в уже построенном индексе.
      *
-     * @param index         мёрженный индекс из {@link #buildMergedFileIndex}
+     * @param fileIndex     мёрженный индекс из {@link #buildMergedFileIndex}
      * @param qualifiedName полное имя класса, например {@code com.example.Foo}
      */
-    public Optional<String> findJavaFileByQualifiedName(Map<String, List<String>> index,
+    public Optional<String> findJavaFileByQualifiedName(Map<String, List<String>> fileIndex,
                                                         String qualifiedName) {
         String simpleName = qualifiedName.contains(".")
                 ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
@@ -191,7 +190,7 @@ public class GitLabService {
         }
         String fileName = simpleName + ".java";
 
-        List<String> candidates = index.getOrDefault(fileName, List.of());
+        List<String> candidates = fileIndex.getOrDefault(fileName, List.of());
         if (candidates.isEmpty()) {
             log.debug("No file found in merged index for class: {}", qualifiedName);
             return Optional.empty();

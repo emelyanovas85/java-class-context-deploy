@@ -12,8 +12,7 @@ import java.util.*;
  *
  * <p>Алгоритм:
  * <ol>
- *   <li>Получить список всех файлов проекта из GitLab (через индекс, уже есть в GitLabService).</li>
- *   <li>Найти все файлы сборки (*.gradle / pom.xml).</li>
+ *   <li>Найти файлы сборки (*.gradle / pom.xml) через уже готовый fileIndex.</li>
  *   <li>Прочитать их содержимое.</li>
  *   <li>Найти Artifactory URL в содержимом Gradle-файлов.</li>
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
@@ -41,22 +40,24 @@ public class DependencyContextService {
      * @param token     токен доступа
      * @param projectId идентификатор проекта
      * @param branch    ветка (source branch из MR)
+     * @param fileIndex мёрженный файловый индекс (имя → пути), построенный в buildContext()
      * @return множество qualified names классов из зависимостей
      */
     public Set<String> collectDependencyClassNames(
-            String gitlabUrl, String token, String projectId, String branch) {
+            String gitlabUrl, String token, String projectId, String branch,
+            Map<String, List<String>> fileIndex) {
 
         log.info("Collecting dependency class names for project={} branch={}", projectId, branch);
 
-        // 1. Получить все пути файлов сборки в проекте
-        List<String> buildFilePaths = gitLabService.findBuildFiles(gitlabUrl, token, projectId, branch);
+        // 1. Найти файлы сборки через готовый индекс
+        List<String> buildFilePaths = gitLabService.findBuildFiles(fileIndex);
         if (buildFilePaths.isEmpty()) {
             log.warn("No build files found in project={} branch={}", projectId, branch);
             return Set.of();
         }
         log.info("Found {} build file(s): {}", buildFilePaths.size(), buildFilePaths);
 
-        // 2. Прочитать содержимое всех найденных файлов сборки
+        // 2. Прочитать содержимое найденных файлов сборки
         Map<String, String> buildFileContents = new LinkedHashMap<>();
         for (String path : buildFilePaths) {
             gitLabService.readRawFileContent(gitlabUrl, token, projectId, branch, path)
