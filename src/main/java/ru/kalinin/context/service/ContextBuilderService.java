@@ -55,10 +55,11 @@ public class ContextBuilderService {
         // ── Этап 0: сбор контекста зависимостей (перед резолвингом) ──────────────────────
         Set<String> dependencyClassNames = dependencyContextService.collectDependencyClassNames(
                 request.gitlabUrl(), request.token(),
-                request.projectId(), sourceBranch);
+                request.projectId(), sourceBranch
+        );
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
-        List<ChangedClassContext> allContexts = new ArrayList<>();
+        List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -68,11 +69,13 @@ public class ContextBuilderService {
 
             Optional<String> sourceContent = gitLabService.readFileContent(
                     request.gitlabUrl(), request.token(),
-                    request.projectId(), sourceBranch, filePath);
+                    request.projectId(), sourceBranch, filePath
+            );
 
             Optional<String> targetContent = gitLabService.readFileContent(
                     request.gitlabUrl(), request.token(),
-                    request.projectId(), targetBranch, filePath);
+                    request.projectId(), targetBranch, filePath
+            );
 
             if (sourceContent.isPresent() && targetContent.isEmpty())
                 log.debug("{} exists only in {} (just created)", filePath, sourceBranch);
@@ -92,8 +95,9 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(ChangedClassContext.of(
-                                cs.qualifiedName(), 0, srcNodes, tgtNodes));
+                        allContexts.add(
+                                ClassContext.of(cs.qualifiedName(), 0, srcNodes, tgtNodes)
+                        );
                     }
                 });
             });
@@ -134,8 +138,9 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            allContexts.add(ChangedClassContext.of(
-                                    cs.qualifiedName(), finalDepth, nodes, nodes));
+                            allContexts.add(
+                                    ClassContext.of(cs.qualifiedName(), finalDepth, nodes, nodes)
+                            );
                         }
                     });
                 });
