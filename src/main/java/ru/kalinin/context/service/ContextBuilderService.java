@@ -41,7 +41,7 @@ public class ContextBuilderService {
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
-        // ── Этап 0: сбор контекста зависимостей (перед резолвингом) ─────────────────────
+        // ── Этап 0: сбор контекста зависимостей (перед резолвингом) ──────────────────────
         Set<String> dependencyClassNames = dependencyContextService.collectDependencyClassNames(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), sourceBranch);
@@ -50,7 +50,7 @@ public class ContextBuilderService {
         List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
-        // ── Уровень 0: изменённые файлы ───────────────────────────────────────────────────
+        // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
         List<ClassStructure> level0 = new ArrayList<>();
         for (String filePath : mrInfo.changedFiles()) {
             log.debug("Level 0: reading {}", filePath);
@@ -81,19 +81,18 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(new ChangedClassContext(
+                        allContexts.add(ChangedClassContext.of(
                                 cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
             });
         }
 
-        // ── Уровни 1..depth-1: зависимости ─────────────────────────────────────────────
+        // ── Уровни 1..depth-1: зависимости ──────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
             referencedTypes.removeAll(processedQNames);
-            // Пропускаем типы, известные из зависимостей (они не находятся в репозитории)
             referencedTypes.removeAll(dependencyClassNames);
             if (referencedTypes.isEmpty()) break;
 
@@ -106,7 +105,7 @@ public class ContextBuilderService {
                 gitLabService.findJavaFileByQualifiedName(
                         request.gitlabUrl(), request.token(),
                         request.projectId(), qName, sourceBranch)
-                .flatMap(filePath -> gitLabService.readFileContent(  // FIXME: почему только sourceBranch???
+                .flatMap(filePath -> gitLabService.readFileContent(
                         request.gitlabUrl(), request.token(),
                         request.projectId(), sourceBranch, filePath)
                         .map(content -> Map.entry(filePath, content)))
@@ -122,8 +121,9 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            allContexts.add(new ChangedClassContext(
-                                    cs.qualifiedName(), finalDepth, nodes, null));
+                            // для зависимостей source и target совпадают — будет UnchangedClassContext
+                            allContexts.add(ChangedClassContext.of(
+                                    cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });
                 });
@@ -135,7 +135,7 @@ public class ContextBuilderService {
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────────────────────
+    // ── helpers ─────────────────────────────────────────────────────────────────────────────────────
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {
