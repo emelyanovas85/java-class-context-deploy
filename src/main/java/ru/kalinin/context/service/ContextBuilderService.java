@@ -20,8 +20,10 @@ import java.util.*;
  *       из зависимостей через sources.jar.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
  *       для каждого строим пару structureSource / structureTarget.</li>
- *   <li>Уровни N ≥ 1: собираем все типы из уровня N-1, ищем в репозитории,
- *       строим структуры только из source-ветки.
+ *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
+ *       Читаем только из source-ветки: нас интересует их текущая структура
+ *       как контекст, а не их изменения — если зависимость сама изменилась
+ *       в этом MR, она уже попала в changedFiles и обработана на уровне 0.
  *       Типы, известные из зависимостей, в резолвинг не идут.</li>
  * </ol>
  */
@@ -30,7 +32,7 @@ import java.util.*;
 @RequiredArgsConstructor
 public class ContextBuilderService {
 
-    /** Состояния MR, при которых анализ возможен. */
+    /** Состояния MR, при которых анал–из возможен. */
     private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
 
     private final GitLabService gitLabService;
@@ -59,7 +61,7 @@ public class ContextBuilderService {
         );
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
-        List<ClassContext> allContexts = new ArrayList<>();
+        List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -95,15 +97,14 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(
-                                ClassContext.of(cs.qualifiedName(), 0, srcNodes, tgtNodes)
-                        );
+                        allContexts.add(ChangedClassContext.of(
+                                cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
             });
         }
 
-        // ── Уровни 1..depth-1: зависимости ──────────────────────────────────────
+        // ── Уровни 1..depth: зависимости ──────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
@@ -121,8 +122,9 @@ public class ContextBuilderService {
                         request.gitlabUrl(), request.token(),
                         request.projectId(), qName, sourceBranch)
                 .flatMap(filePath -> gitLabService.readFileContent(
-                        // TODO: почему для уровней > 0 читаем только sourceBranch,
-                        // а не сравниваем source/target так же, как на уровне 0?
+                        // Классы уровня N≥1 — это зависимости, не входящие в diff MR.
+                        // Нам нужна только их текущая структура как контекст, а не их изменения.
+                        // Если зависимость сама изменилась в этом MR — она уже в changedFiles и обработана на уровне 0.
                         request.gitlabUrl(), request.token(),
                         request.projectId(), sourceBranch, filePath)
                         .map(content -> Map.entry(filePath, content)))
@@ -138,9 +140,8 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            allContexts.add(
-                                    ClassContext.of(cs.qualifiedName(), finalDepth, nodes, nodes)
-                            );
+                            allContexts.add(ChangedClassContext.of(
+                                    cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });
                 });
