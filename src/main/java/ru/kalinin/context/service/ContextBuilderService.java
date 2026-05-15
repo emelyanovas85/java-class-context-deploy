@@ -58,7 +58,7 @@ public class ContextBuilderService {
                 request.projectId(), sourceBranch);
         log.info("Dependency context: {} known external class names", dependencyClassNames.size());
 
-        List<ClassContext> allContexts = new ArrayList<>();
+        List<ChangedClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -92,7 +92,7 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(ClassContext.of(
+                        allContexts.add(ChangedClassContext.of(
                                 cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
@@ -117,6 +117,8 @@ public class ContextBuilderService {
                         request.gitlabUrl(), request.token(),
                         request.projectId(), qName, sourceBranch)
                 .flatMap(filePath -> gitLabService.readFileContent(
+                        // TODO: почему для уровней > 0 читаем только sourceBranch,
+                        // а не сравниваем source/target так же, как на уровне 0?
                         request.gitlabUrl(), request.token(),
                         request.projectId(), sourceBranch, filePath)
                         .map(content -> Map.entry(filePath, content)))
@@ -132,7 +134,7 @@ public class ContextBuilderService {
                             processedQNames.add(cs.qualifiedName());
                             nextLevel.add(cs);
                             addNestedQNames(cs, processedQNames);
-                            allContexts.add(ClassContext.of(
+                            allContexts.add(ChangedClassContext.of(
                                     cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });
