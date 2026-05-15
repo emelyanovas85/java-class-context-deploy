@@ -14,14 +14,12 @@ import java.util.*;
  * <ol>
  *   <li>Найти файлы сборки (*.gradle / pom.xml) через уже готовый fileIndex.</li>
  *   <li>Прочитать их содержимое.</li>
- *   <li>Найти Artifactory URL в содержимом Gradle-файлов.</li>
+ *   <li>Найти все Artifactory repo URL из Gradle-файлов.</li>
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
- *   <li>Для каждой зависимости скачать *-sources.jar и извлечь имена классов.</li>
+ *   <li>Для каждой зависимости перебрать все repo URL до первого успешного.</li>
  * </ol>
  *
  * <p>Результат — {@code Set<String>} qualified names всех классов из зависимостей.
- * Эти имена используются в {@link ContextBuilderService} для пропуска резолвинга
- * типов, которые заведомо относятся к внешним библиотекам.
  */
 @Slf4j
 @Service
@@ -64,15 +62,15 @@ public class DependencyContextService {
                     .ifPresent(content -> buildFileContents.put(path, content));
         }
 
-        // 3. Найти Artifactory URL из Gradle-файлов
+        // 3. Найти все Artifactory repo URL из Gradle-файлов
         List<String> gradleContents = buildFileContents.entrySet().stream()
                 .filter(e -> e.getKey().endsWith(".gradle") || e.getKey().endsWith(".gradle.kts"))
                 .map(Map.Entry::getValue)
                 .toList();
 
-        Optional<String> artifactoryUrl = sourcesLoader.detectArtifactoryUrl(gradleContents);
-        if (artifactoryUrl.isEmpty()) {
-            log.warn("Artifactory URL not found — skipping dependency sources download");
+        List<String> artifactoryUrls = sourcesLoader.detectArtifactoryUrls(gradleContents);
+        if (artifactoryUrls.isEmpty()) {
+            log.warn("Artifactory URLs not found — skipping dependency sources download");
             return Set.of();
         }
 
@@ -107,12 +105,10 @@ public class DependencyContextService {
         }
         log.info("Total versioned dependencies to process: {}", allDeps.size());
 
-        // 5. Скачать sources.jar и извлечь имена классов
+        // 5. Скачать sources.jar, перебирая все repo URL
         Set<String> allClassNames = new HashSet<>();
-        String baseUrl = artifactoryUrl.get();
-
         for (DependencyCoordinate dep : allDeps) {
-            sourcesLoader.downloadSourcesJar(baseUrl, dep).ifPresent(jarBytes -> {
+            sourcesLoader.downloadSourcesJar(artifactoryUrls, dep).ifPresent(jarBytes -> {
                 Set<String> names = classNameExtractor.extractClassNames(jarBytes, dep.toString());
                 allClassNames.addAll(names);
             });

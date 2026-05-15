@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -14,9 +15,9 @@ import java.util.regex.Pattern;
  * Скачивает {@code *-sources.jar} из Artifactory.
  *
  * <h3>Определение URL Artifactory</h3>
- * <p>URL ищется в содержимом Gradle-файлов как строка без пробелов,
- * содержащая одновременно {@code http} и {@code artifactory}.
- * Например: {@code https://artifactory.company.com/artifactory/libs-release}
+ * <p>Ищем все {@code http(s)://...artifactory...} URL во всех Gradle-файлах.
+ * Один артефакт может лежать в любом из репозиториев, поэтому собираем
+ * <b>все</b> найденные URL и перебираем их при скачивании.
  *
  * <h3>Построение ссылки на sources.jar</h3>
  * <p>Итоговый URL: {@code <repoUrl>/<group/artifact/version/artifact-version-sources.jar>}
@@ -27,12 +28,14 @@ import java.util.regex.Pattern;
 public class ArtifactorySourcesLoader {
 
     /**
-     * Ищет строки вида {@code https://...artifactory...} (без пробелов).
-     * Захватывает URL целиком, включая возможный trailing-путь репозитория.
+     * Находит все вхождения вида {@code http(s)://...<anything>...artifactory...<anything>}.
+     * Паттерн останавливается на первом символе, не являющемся частью URL:
+     * пробел, перенос строки, прямые/типографские кавычки, запятая, закрывающая скобка.
      */
     private static final Pattern ARTIFACTORY_URL_PATTERN = Pattern.compile(
-            "(https?://\\S*artifactory\\S*)",
-            Pattern.CASE_INSENSITIVE);
+            "(https?://[^\\s'\"‘’“”,)]+artifactory[^\\s'\"‘’“”,)]*)",
+            Pattern.CASE_INSENSITIVE
+    );
 
     private final RestClient restClient;
 
@@ -41,59 +44,86 @@ public class ArtifactorySourcesLoader {
     }
 
     /**
-     * Ищет Artifactory URL в переданных Gradle-файлах.
+     * Собирает все Artifactory repo URL из переданных Gradle-файлов.
+     *
+     * <p>URL дедуплицируются — один URL может быть упомянут в нескольких файлах.
      *
      * @param gradleFileContents список содержимого *.gradle файлов проекта
-     * @return первый найденный URL или {@code Optional.empty()}
+     * @return уникальные URL всех найденных Artifactory-репозиториев, или пустой список
      */
-    public Optional<String> detectArtifactoryUrl(List<String> gradleFileContents) {
+    public List<String> detectArtifactoryUrls(List<String> gradleFileContents) {
+        List<String> urls = new ArrayList<>();
         for (String content : gradleFileContents) {
             Matcher m = ARTIFACTORY_URL_PATTERN.matcher(content);
-            if (m.find()) {
-                String url = m.group(1).replaceAll("['\",)]+$", ""); // убираем возможные замыкающие кавычки/скобки
-                log.info("Detected Artifactory URL: {}", url);
-                return Optional.of(url);
+            while (m.find()) {
+                String url = normalizeUrl(m.group(1));
+                if (!urls.contains(url)) {
+                    urls.add(url);
+                    log.debug("Found Artifactory repo URL: {}", url);
+                }
             }
         }
-        log.warn("Artifactory URL not found in Gradle files");
-        return Optional.empty();
+        if (urls.isEmpty()) {
+            log.warn("No Artifactory URLs found in Gradle files");
+        } else {
+            log.info("Detected {} Artifactory repo URL(s): {}", urls.size(), urls);
+        }
+        return List.copyOf(urls);
     }
 
     /**
      * Скачивает байты {@code *-sources.jar} для указанной зависимости.
      *
-     * @param artifactoryBaseUrl базовый URL репозитория Artifactory
-     * @param dep                координаты зависимости (с явной версией)
-     * @return байты jar-файла или {@code Optional.empty()} если недоступен
+     * <p>Перебирает все переданные repo URL до первого успешного ответа.
+     *
+     * @param artifactoryRepoUrls список repo URL из {@link #detectArtifactoryUrls}
+     * @param dep                 координаты зависимости (с явной версией)
+     * @return байты jar-файла или {@code Optional.empty()} если ни в одном репозитории не нашлось
      */
-    public Optional<byte[]> downloadSourcesJar(String artifactoryBaseUrl, DependencyCoordinate dep) {
+    public Optional<byte[]> downloadSourcesJar(List<String> artifactoryRepoUrls,
+                                               DependencyCoordinate dep) {
         if (!dep.hasVersion()) {
             log.debug("Skipping BOM-managed dependency without version: {}", dep);
             return Optional.empty();
         }
 
-        // Убираем trailing slash у base URL
-        String base = artifactoryBaseUrl.endsWith("/")
-                ? artifactoryBaseUrl.substring(0, artifactoryBaseUrl.length() - 1)
-                : artifactoryBaseUrl;
+        String relativePath = dep.mavenRelativePath() + dep.sourcesJarName();
 
-        String url = base + '/' + dep.mavenRelativePath() + dep.sourcesJarName();
-        log.debug("Downloading sources.jar: {}", url);
+        for (String repoUrl : artifactoryRepoUrls) {
+            String base = repoUrl.endsWith("/")
+                    ? repoUrl.substring(0, repoUrl.length() - 1)
+                    : repoUrl;
+            String url = base + '/' + relativePath;
+            log.debug("Trying sources.jar: {}", url);
 
-        try {
-            byte[] bytes = restClient.get()
-                    .uri(url)
-                    .retrieve()
-                    .body(byte[].class);
-            if (bytes == null || bytes.length == 0) {
-                log.debug("Empty response for sources.jar: {}", url);
-                return Optional.empty();
+            try {
+                byte[] bytes = restClient.get()
+                        .uri(url)
+                        .retrieve()
+                        .body(byte[].class);
+                if (bytes != null && bytes.length > 0) {
+                    log.info("Downloaded sources.jar ({} bytes) from {}: {}", bytes.length, repoUrl, dep);
+                    return Optional.of(bytes);
+                }
+            } catch (RestClientException e) {
+                log.debug("Not found in {}: {} — {}", repoUrl, dep, e.getMessage());
             }
-            log.info("Downloaded sources.jar ({} bytes): {}", bytes.length, dep);
-            return Optional.of(bytes);
-        } catch (RestClientException e) {
-            log.debug("sources.jar not available for {}: {}", dep, e.getMessage());
-            return Optional.empty();
         }
+
+        log.debug("sources.jar not found in any repo for: {}", dep);
+        return Optional.empty();
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Удаляет замыкающие нежелательные символы с конца URL:
+     * прямые и типографские кавычки, запятые, скобки.
+     */
+    private static String normalizeUrl(String raw) {
+        // Срезаем любые кавычки/скобки в конце (на случай если паттерн всё же захватил что-то лишнее)
+        return raw.replaceAll("['\"‘’“”,)]+$", "");
     }
 }
