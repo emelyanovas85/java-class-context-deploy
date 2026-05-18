@@ -3,6 +3,7 @@ package ru.kalinin.context.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import ru.kalinin.context.dependency.DependencyClassNameExtractor;
 import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
@@ -17,12 +18,12 @@ import java.util.*;
  * <ol>
  *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
  *   <li>Построение мёрженного файлового индекса: target + patch из diff MR.</li>
- *   <li>Сбор контекста зависимостей через тот же индекс.</li>
+ *   <li>Сбор карты зависимостей: qualified name → байты jar (с кэшированием).</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
  *       для каждого строим пару structureSource / structureTarget.</li>
  *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
- *       Читаем только из source-ветки. Если зависимость сама изменилась
- *       в этом MR — она уже в changedFiles и обработана на уровне 0.</li>
+ *       Сначала ищем в репозитории (fileIndex), затем — в sources.jar.
+ *       Если зависимость сама изменилась в MR — она уже обработана на уровне 0.</li>
  * </ol>
  */
 @Slf4j
@@ -37,6 +38,7 @@ public class ContextBuilderService {
     private final JavaStructureParser structureParser;
     private final StructureNodeMapper nodeMapper;
     private final DependencyContextService dependencyContextService;
+    private final DependencyClassNameExtractor classNameExtractor;
 
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
@@ -51,19 +53,21 @@ public class ContextBuilderService {
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
-        // Индекс строится один раз и дальше передаётся всем, кому он нужен
+        // Индекс строится один раз и передаётся всем, кому он нужен
         Map<String, List<String>> fileIndex = gitLabService.buildMergedFileIndex(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), targetBranch, mrInfo.diffs()
         );
 
-        Set<String> dependencyClassNames = dependencyContextService.collectDependencyClassNames(
+        // Карта: qualified name → байты jar, в котором находится класс.
+        // Jar-файлы кэшируются в ArtifactorySourcesLoader между вызовами.
+        Map<String, byte[]> dependencySources = dependencyContextService.collectDependencySources(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), sourceBranch, fileIndex
         );
-        log.info("Dependency context: {} known external class names", dependencyClassNames.size());
+        log.info("Dependency context: {} known external class names", dependencySources.size());
 
-        List<ChangedClassContext> allContexts = new ArrayList<>();
+        List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
         // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
@@ -99,7 +103,7 @@ public class ContextBuilderService {
                         processedQNames.add(cs.qualifiedName());
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
-                        allContexts.add(ChangedClassContext.of(
+                        allContexts.add(ClassContext.of(
                                 cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
@@ -111,7 +115,6 @@ public class ContextBuilderService {
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
             referencedTypes.removeAll(processedQNames);
-            referencedTypes.removeAll(dependencyClassNames);
             if (referencedTypes.isEmpty()) break;
 
             log.debug("Depth {}: resolving {} referenced types", depth, referencedTypes.size());
@@ -120,28 +123,58 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
-                gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
-                        .flatMap(filePath -> gitLabService.readFileContent(
-                                request.gitlabUrl(), request.token(),
-                                request.projectId(), sourceBranch, filePath)
-                                .map(content -> Map.entry(filePath, content)))
-                        .ifPresent(entry -> {
-                            String filePath = entry.getKey();
-                            String content = entry.getValue();
-                            List<ClassStructure> parsed =
-                                    structureParser.parse(content, filePath, finalDepth);
-                            List<StructureNode> nodes = nodeMapper.map(content, filePath);
+                // 1. Ищем в репозитории проекта
+                Optional<Map.Entry<String, String>> repoSource =
+                        gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
+                                .flatMap(filePath -> gitLabService.readFileContent(
+                                        request.gitlabUrl(), request.token(),
+                                        request.projectId(), sourceBranch, filePath)
+                                        .map(content -> Map.entry(filePath, content)));
 
-                            parsed.forEach(cs -> {
-                                if (!processedQNames.contains(cs.qualifiedName())) {
-                                    processedQNames.add(cs.qualifiedName());
-                                    nextLevel.add(cs);
-                                    addNestedQNames(cs, processedQNames);
-                                    allContexts.add(ChangedClassContext.of(
-                                            cs.qualifiedName(), finalDepth, nodes, nodes));
-                                }
-                            });
-                        });
+                if (repoSource.isPresent()) {
+                    String filePath = repoSource.get().getKey();
+                    String content = repoSource.get().getValue();
+                    List<ClassStructure> parsed =
+                            structureParser.parse(content, filePath, finalDepth);
+                    List<StructureNode> nodes = nodeMapper.map(content, filePath);
+
+                    parsed.forEach(cs -> {
+                        if (!processedQNames.contains(cs.qualifiedName())) {
+                            processedQNames.add(cs.qualifiedName());
+                            nextLevel.add(cs);
+                            addNestedQNames(cs, processedQNames);
+                            allContexts.add(ClassContext.of(
+                                    cs.qualifiedName(), finalDepth, nodes, nodes));
+                        }
+                    });
+                    continue;
+                }
+
+                // 2. Ищем в sources.jar зависимостей
+                byte[] jarBytes = dependencySources.get(qName);
+                if (jarBytes == null) {
+                    log.debug("Type {} not found in repo or dependency sources — skipping", qName);
+                    continue;
+                }
+
+                classNameExtractor.extractSourceFile(jarBytes, qName).ifPresent(content -> {
+                    // Имя файла — последний сегмент qualified name
+                    String syntheticPath = qName.replace('.', '/') + ".java";
+                    List<ClassStructure> parsed =
+                            structureParser.parse(content, syntheticPath, finalDepth);
+                    List<StructureNode> nodes = nodeMapper.map(content, syntheticPath);
+
+                    parsed.forEach(cs -> {
+                        if (!processedQNames.contains(cs.qualifiedName())) {
+                            processedQNames.add(cs.qualifiedName());
+                            nextLevel.add(cs);
+                            addNestedQNames(cs, processedQNames);
+                            allContexts.add(ClassContext.of(
+                                    cs.qualifiedName(), finalDepth, nodes, nodes));
+                        }
+                    });
+                    log.debug("Resolved {} from dependency sources.jar", qName);
+                });
             }
 
             currentLevel = nextLevel;

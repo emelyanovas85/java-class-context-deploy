@@ -16,10 +16,12 @@ import java.util.*;
  *   <li>Прочитать их содержимое.</li>
  *   <li>Найти все Artifactory repo URL из Gradle-файлов.</li>
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
- *   <li>Для каждой зависимости перебрать все repo URL до первого успешного.</li>
+ *   <li>Для каждой зависимости скачать sources.jar (с кэшированием) и извлечь исходники.</li>
  * </ol>
  *
- * <p>Результат — {@code Set<String>} qualified names всех классов из зависимостей.
+ * <p>Результат — {@code Map<String, byte[]>}: qualified name класса → байты jar,
+ * в котором этот класс находится. Это позволяет {@code ContextBuilderService}
+ * резолвить исходный код любого типа прямо из jar.
  */
 @Slf4j
 @Service
@@ -32,26 +34,29 @@ public class DependencyContextService {
     private final DependencyClassNameExtractor classNameExtractor;
 
     /**
-     * Собирает имена классов из всех зависимостей проекта.
+     * Собирает карту «qualified name → байты jar» для всех классов из зависимостей.
+     *
+     * <p>Jar-файлы кэшируются в {@link ArtifactorySourcesLoader}: повторный вызов
+     * для того же MR или другого MR того же проекта не инициирует повторную загрузку.
      *
      * @param gitlabUrl URL GitLab-инстанса
      * @param token     токен доступа
      * @param projectId идентификатор проекта
      * @param branch    ветка (source branch из MR)
      * @param fileIndex мёрженный файловый индекс (имя → пути), построенный в buildContext()
-     * @return множество qualified names классов из зависимостей
+     * @return карта qualified name → байты jar (может быть пустой)
      */
-    public Set<String> collectDependencyClassNames(
+    public Map<String, byte[]> collectDependencySources(
             String gitlabUrl, String token, String projectId, String branch,
             Map<String, List<String>> fileIndex) {
 
-        log.info("Collecting dependency class names for project={} branch={}", projectId, branch);
+        log.info("Collecting dependency sources for project={} branch={}", projectId, branch);
 
         // 1. Найти файлы сборки через готовый индекс
         List<String> buildFilePaths = gitLabService.findBuildFiles(fileIndex);
         if (buildFilePaths.isEmpty()) {
             log.warn("No build files found in project={} branch={}", projectId, branch);
-            return Set.of();
+            return Map.of();
         }
         log.info("Found {} build file(s): {}", buildFilePaths.size(), buildFilePaths);
 
@@ -71,7 +76,7 @@ public class DependencyContextService {
         List<String> artifactoryUrls = sourcesLoader.detectArtifactoryUrls(gradleContents);
         if (artifactoryUrls.isEmpty()) {
             log.warn("Artifactory URLs not found — skipping dependency sources download");
-            return Set.of();
+            return Map.of();
         }
 
         // 4. Извлечь зависимости с версиями
@@ -101,20 +106,22 @@ public class DependencyContextService {
 
         if (allDeps.isEmpty()) {
             log.info("No versioned dependencies found");
-            return Set.of();
+            return Map.of();
         }
         log.info("Total versioned dependencies to process: {}", allDeps.size());
 
-        // 5. Скачать sources.jar, перебирая все repo URL
-        Set<String> allClassNames = new HashSet<>();
+        // 5. Скачать sources.jar (кэшируется) и построить карту qualifiedName → jarBytes
+        Map<String, byte[]> dependencySources = new HashMap<>();
         for (DependencyCoordinate dep : allDeps) {
             sourcesLoader.downloadSourcesJar(artifactoryUrls, dep).ifPresent(jarBytes -> {
-                Set<String> names = classNameExtractor.extractClassNames(jarBytes, dep.toString());
-                allClassNames.addAll(names);
+                Map<String, String> sources = classNameExtractor.extractSources(jarBytes, dep.toString());
+                // Сохраняем ссылку на jar для каждого класса из этого артефакта
+                sources.keySet().forEach(qName -> dependencySources.put(qName, jarBytes));
+                log.debug("Indexed {} classes from {}", sources.size(), dep);
             });
         }
 
-        log.info("Total dependency class names collected: {}", allClassNames.size());
-        return Collections.unmodifiableSet(allClassNames);
+        log.info("Total dependency classes indexed: {}", dependencySources.size());
+        return Collections.unmodifiableMap(dependencySources);
     }
 }

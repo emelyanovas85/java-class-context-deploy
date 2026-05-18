@@ -8,11 +8,17 @@ import org.springframework.web.client.RestClientException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Скачивает {@code *-sources.jar} из Artifactory.
+ *
+ * <h3>Кэширование</h3>
+ * <p>Скачанные jar-файлы кэшируются в памяти по {@link DependencyCoordinate}.
+ * Повторный вызов {@link #downloadSourcesJar} для той же зависимости
+ * возвращает результат из кэша без сетевого запроса.
  *
  * <h3>Определение URL Artifactory</h3>
  * <p>Ищем все {@code http(s)://...artifactory...} URL во всех Gradle-файлах.
@@ -33,9 +39,12 @@ public class ArtifactorySourcesLoader {
      * пробел, перенос строки, прямые/типографские кавычки, запятая, закрывающая скобка.
      */
     private static final Pattern ARTIFACTORY_URL_PATTERN = Pattern.compile(
-            "(https?://[^\\s'\"‘’“”,)]+artifactory[^\\s'\"‘’“”,)]*)",
+            "(https?://[^\\s'\"\u2018\u2019\u201c\u201d,)]+artifactory[^\\s'\"\u2018\u2019\u201c\u201d,)]*)",
             Pattern.CASE_INSENSITIVE
     );
+
+    /** Кэш: координаты зависимости → байты скачанного sources.jar. */
+    private final ConcurrentHashMap<DependencyCoordinate, byte[]> jarCache = new ConcurrentHashMap<>();
 
     private final RestClient restClient;
 
@@ -72,7 +81,10 @@ public class ArtifactorySourcesLoader {
     }
 
     /**
-     * Скачивает байты {@code *-sources.jar} для указанной зависимости.
+     * Возвращает байты {@code *-sources.jar} для указанной зависимости.
+     *
+     * <p>Результат кэшируется: повторный вызов для той же зависимости
+     * не выполняет сетевой запрос.
      *
      * <p>Перебирает все переданные repo URL до первого успешного ответа.
      *
@@ -85,6 +97,12 @@ public class ArtifactorySourcesLoader {
         if (!dep.hasVersion()) {
             log.debug("Skipping BOM-managed dependency without version: {}", dep);
             return Optional.empty();
+        }
+
+        byte[] cached = jarCache.get(dep);
+        if (cached != null) {
+            log.debug("sources.jar cache hit for: {}", dep);
+            return Optional.of(cached);
         }
 
         String relativePath = dep.mavenRelativePath() + dep.sourcesJarName();
@@ -103,6 +121,7 @@ public class ArtifactorySourcesLoader {
                         .body(byte[].class);
                 if (bytes != null && bytes.length > 0) {
                     log.info("Downloaded sources.jar ({} bytes) from {}: {}", bytes.length, repoUrl, dep);
+                    jarCache.put(dep, bytes);
                     return Optional.of(bytes);
                 }
             } catch (RestClientException e) {
@@ -123,7 +142,6 @@ public class ArtifactorySourcesLoader {
      * прямые и типографские кавычки, запятые, скобки.
      */
     private static String normalizeUrl(String raw) {
-        // Срезаем любые кавычки/скобки в конце (на случай если паттерн всё же захватил что-то лишнее)
-        return raw.replaceAll("['\"‘’“”,)]+$", "");
+        return raw.replaceAll("['\"\u2018\u2019\u201c\u201d,)]+$", "");
     }
 }
