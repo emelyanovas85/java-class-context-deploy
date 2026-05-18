@@ -13,8 +13,8 @@ import java.util.regex.Pattern;
  *
  * <p>Поддерживаемые нотации:
  * <ul>
- *   <li>Строковая:  {@code implementation 'group:artifact:version'}</li>
- *   <li>Строковая с двойными кавычками: {@code implementation "group:artifact:version"}</li>
+ *   <li>Строковая без скобок:  {@code implementation 'group:artifact:version'}</li>
+ *   <li>Строковая со скобками: {@code implementation("group:artifact:version")}</li>
  *   <li>Map-нотация: {@code implementation group: 'com.example', name: 'foo', version: '1.0'}</li>
  * </ul>
  *
@@ -26,13 +26,15 @@ public class GradleDependencyExtractor implements DependencyExtractor {
 
     /**
      * Строковая нотация: configuration 'group:artifact:version' или "group:artifact:version".
+     * Поддерживает оба стиля — со скобками (Kotlin DSL / Groovy) и без (Groovy).
      * Версия обязательна — строки без третьего сегмента игнорируются.
      */
     private static final Pattern STRING_NOTATION = Pattern.compile(
             "(?:implementation|api|compileOnly|runtimeOnly|annotationProcessor"
             + "|testImplementation|testCompileOnly|testRuntimeOnly|testAnnotationProcessor"
             + "|provided|compile|runtime)"
-            + "\\s+[\"']([A-Za-z0-9_.\\-]+):([A-Za-z0-9_.\\-]+):([A-Za-z0-9_.\\-]+)[\"']",
+            + "(?:\\s+|\\s*\\(\\s*)"
+            + "[\"']([A-Za-z0-9_.\\-]+):([A-Za-z0-9_.\\-]+):([A-Za-z0-9_.\\-]+)[\"']\\)?",
             Pattern.MULTILINE);
 
     /**
