@@ -25,7 +25,9 @@ import java.util.function.BiFunction;
  *       которая резолвит (simpleName, wildcardPackages) → qualified name,
  *       используя fileIndex и dependencySources.</li>
  *   <li>Уровень 0: изменённые файлы.</li>
- *   <li>Уровни 1..depth: зависимости, поиск по exact qualified name в repo и jar.</li>
+ *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
+ *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
+ *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
  * </ol>
  */
 @Slf4j
@@ -65,15 +67,13 @@ public class ContextBuilderService {
         );
         log.info("Dependency context: {} known external class names", dependencySources.size());
 
-        // Лямбда-резолвер wildcard-импортов: (simpleName, wildcardPackages) → Optional<qualifiedName>.
-        // Строится один раз для всего buildContext(), передаётся в parse().
         BiFunction<String, List<String>, Optional<String>> wildcardResolver =
                 buildWildcardResolver(fileIndex, dependencySources);
 
         List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
-        // ── Уровень 0: изменённые файлы ──────────────────────────────────────────
+        // ── Уровень 0: изменённые файлы ────────────────────────────────────────────
         List<ClassStructure> level0 = new ArrayList<>();
         for (String filePath : mrInfo.changedFiles()) {
             log.debug("Level 0: reading {}", filePath);
@@ -112,7 +112,7 @@ public class ContextBuilderService {
             });
         }
 
-        // ── Уровни 1..depth: зависимости ───────────────────────────────────────
+        // ── Уровни 1..depth: зависимости ───────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
@@ -125,13 +125,12 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
-                // 1. Точный поиск в репозитории
+                // 1. Поиск в репозитории: сначала точный, затем откусывание сегментов
+                //    (Outer.Inner → ищем Outer.java, запоминаем qName в processedQNames)
                 Optional<Map.Entry<String, String>> repoSource =
-                        gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
-                                .flatMap(filePath -> gitLabService.readFileContent(
-                                        request.gitlabUrl(), request.token(),
-                                        request.projectId(), sourceBranch, filePath)
-                                        .map(content -> Map.entry(filePath, content)));
+                        findRepoSourceForType(qName, fileIndex,
+                                request.gitlabUrl(), request.token(),
+                                request.projectId(), sourceBranch, processedQNames);
 
                 if (repoSource.isPresent()) {
                     addFromRepoSource(repoSource.get(), finalDepth, wildcardResolver,
@@ -157,23 +156,70 @@ public class ContextBuilderService {
     }
 
     // -------------------------------------------------------------------------
+    // Repo source lookup
+    // -------------------------------------------------------------------------
+
+    /**
+     * Ищет файл источника для {@code qName} в репозитории.
+     *
+     * <p>Алгоритм:
+     * <ol>
+     *   <li>Точный поиск: {@code findJavaFileByQualifiedName(fileIndex, qName)}.</li>
+     *   <li>Если не нашёл — последовательно откусываем последний сегмент qName
+     *       и повторяем поиск. Это покрывает случай
+     *       {@code forms.credit.X.Ввод_Новой_записи.ВкладкаРевизитыЗаявления}:
+     *       outer часть {@code forms.credit.X.Ввод_Новой_записи} найдётся
+     *       как файл в индексе.</li>
+     *   <li>Исходный {@code qName} (сх вложенным типом) добавляется в
+     *       {@code processedQNames} сразу, чтобы не повторять попытку
+     *       резолвера на следующем уровне.</li>
+     * </ol>
+     */
+    private Optional<Map.Entry<String, String>> findRepoSourceForType(
+            String qName,
+            Map<String, List<String>> fileIndex,
+            String gitlabUrl, String token, int projectId, String branch,
+            Set<String> processedQNames) {
+
+        // Точный поиск
+        Optional<Map.Entry<String, String>> exact = readRepoFile(qName, fileIndex, gitlabUrl, token, projectId, branch);
+        if (exact.isPresent()) return exact;
+
+        // Последовательное откусывание правого сегмента
+        String candidate = qName;
+        while (candidate.contains(".")) {
+            candidate = candidate.substring(0, candidate.lastIndexOf('.'));
+            Optional<Map.Entry<String, String>> found =
+                    readRepoFile(candidate, fileIndex, gitlabUrl, token, projectId, branch);
+            if (found.isPresent()) {
+                // Исходный qName (с вложенным типом) помечаем как обработанный
+                processedQNames.add(qName);
+                log.debug("Type '{}' resolved via outer class '{}'", qName, candidate);
+                return found;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Находит файл в fileIndex по qualified name и читает его содержимое.
+     */
+    private Optional<Map.Entry<String, String>> readRepoFile(
+            String qName,
+            Map<String, List<String>> fileIndex,
+            String gitlabUrl, String token, int projectId, String branch) {
+        return gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
+                .flatMap(filePath -> gitLabService.readFileContent(
+                        gitlabUrl, token, projectId, branch, filePath)
+                        .map(content -> Map.entry(filePath, content)));
+    }
+
+    // -------------------------------------------------------------------------
     // Wildcard resolver
     // -------------------------------------------------------------------------
 
     /**
      * Строит лямбду-резолвер для wildcard-импортов.
-     *
-     * <p>Алгоритм:
-     * <ol>
-     *   <li>Ищем в {@code fileIndex} файлы {@code SimpleName.java}
-     *       в папках, совпадающих с одним из wildcardPackages.</li>
-     *   <li>Ищем в ключах {@code dependencySources}
-     *       записи, qualified name которых заканчивается на {@code .<simpleName>}
-     *       и пакет есть в wildcardPackages.</li>
-     *   <li>Если найден ровно один кандидат — возвращаем его qualified name.
-     *       Если ни одного кандидата / амбигуация — {@code Optional.empty()},
-     *       при амбигуации пишем warn в лог.</li>
-     * </ol>
      */
     private BiFunction<String, List<String>, Optional<String>> buildWildcardResolver(
             Map<String, List<String>> fileIndex,
@@ -182,22 +228,18 @@ public class ContextBuilderService {
         return (simpleName, wildcardPackages) -> {
             List<String> candidates = new ArrayList<>();
 
-            // Ищем в fileIndex: путь вида "<wildcardPkg>/<simpleName>.java"
             String fileName = simpleName + ".java";
             List<String> filePaths = fileIndex.getOrDefault(fileName, List.of());
             for (String path : filePaths) {
                 String dirPath = path.contains("/")
                         ? path.substring(0, path.lastIndexOf('/'))
                         : "";
-                // dirPath в виде "src/main/java/pkg/sub" — нужно извлечь пакет
                 String pkgFromPath = dirPathToPackage(dirPath);
                 if (wildcardPackages.contains(pkgFromPath)) {
                     candidates.add(pkgFromPath + "." + simpleName);
                 }
             }
 
-            // Ищем в dependencySources: ключ оканчивается на ".SimpleName"
-            // и пакет (без последнего сегмента) есть в wildcardPackages
             if (candidates.isEmpty()) {
                 String suffix = "." + simpleName;
                 for (String qName : dependencySources.keySet()) {
@@ -210,9 +252,7 @@ public class ContextBuilderService {
                 }
             }
 
-            if (candidates.size() == 1) {
-                return Optional.of(candidates.get(0));
-            }
+            if (candidates.size() == 1) return Optional.of(candidates.get(0));
             if (candidates.size() > 1) {
                 log.warn("Ambiguous wildcard resolution for '{}': candidates={} wildcards={}",
                         simpleName, candidates, wildcardPackages);
@@ -221,13 +261,7 @@ public class ContextBuilderService {
         };
     }
 
-    /**
-     * Преобразует путь директории в пакет Java.
-     * {@code src/main/java/com/example} → {@code com.example}
-     * {@code com/example} → {@code com.example}
-     */
     private static String dirPathToPackage(String dirPath) {
-        // Убираем стандартные префиксы Maven/Gradle source roots
         for (String prefix : List.of("src/main/java/", "src/test/java/", "src/main/kotlin/")) {
             if (dirPath.startsWith(prefix)) {
                 dirPath = dirPath.substring(prefix.length());
