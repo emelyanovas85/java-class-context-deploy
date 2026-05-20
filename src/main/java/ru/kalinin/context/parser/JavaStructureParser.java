@@ -19,21 +19,25 @@ import java.util.function.BiFunction;
 /**
  * Парсит Java-исходники с помощью JavaParser и строит {@link ClassStructure}.
  *
- * <h3>resolveType работает в пять шагов</h3>
+ * <h3>resolveType работает в шесть шагов</h3>
  * <ol>
  *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
  *   <li><b>Sibling / nested type</b>: все top-level типы файла и прямые nested типы
  *       каждого класса зарегистрированы в {@code importMap} через {@code putIfAbsent}.</li>
  *   <li><b>Wildcard resolver</b>: если есть {@code import pkg.*} —
- *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.
- *       Если не нашёл — оставляет simple name.</li>
+ *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.</li>
  *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
- *       добавляет префикс пакета файла.</li>
- *   <li><b>Частично-квалифицированный тип</b> ({@code Outer.Inner}): если левая часть
- *       ({@code Outer}) есть в {@code importMap} — подставляем префикс.
- *       Например: {@code Сообщение.Имена_Диалоговых_Окон} →
- *       {@code forms.general.dialog.Сообщение.Имена_Диалоговых_Окон}.</li>
- *   <li>Возвращает как есть (встроенные, void, already fully-qualified).</li>
+ *       добавляет префикс пакета файла (только для simple name).</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в importMap</b> ({@code Outer.Inner}):
+ *       если левая часть ({@code Outer}) есть в {@code importMap} — подставляем префикс.
+ *       Например: {@code Сообщение.Имена_Окон} →
+ *       {@code forms.general.dialog.Сообщение.Имена_Окон}.</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в том же пакете</b>:
+ *       если левая часть начинается с заглавной и пакет известен —
+ *       применяем same-package fallback к целому выражению.
+ *       Например: {@code Ввод_Новой_записи.Вкладка} (Outer - другой файл того же пакета) →
+ *       {@code forms.credit.X.Ввод_Новой_записи.Вкладка}.</li>
+ *   <li>Возвращает как есть (already fully-qualified).</li>
  * </ol>
  *
  * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
@@ -43,10 +47,6 @@ import java.util.function.BiFunction;
 @Component
 public class JavaStructureParser {
 
-    /**
-     * Резолвер wildcard-импортов, не делающий ничего.
-     * Сигнатура: (simpleName, wildcardPackages) → Optional&lt;qualifiedName&gt;
-     */
     public static final BiFunction<String, List<String>, Optional<String>> NO_OP_RESOLVER =
             (simpleName, pkgs) -> Optional.empty();
 
@@ -62,15 +62,6 @@ public class JavaStructureParser {
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Парсит исходник и возвращает список структур всех классов верхнего уровня.
-     *
-     * @param sourceCode       содержимое .java файла
-     * @param sourceFile       путь к файлу (для метаданных)
-     * @param contextLevel     уровень контекста (0 = изменённый, 1+ = зависимость)
-     * @param wildcardResolver (симпль имя, список wildcard-пакетов) → qualified name;
-     *                         если не нужен, используйте {@link #NO_OP_RESOLVER}
-     */
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel,
                                       BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
         ParseResult<CompilationUnit> result = parser.parse(sourceCode);
@@ -104,16 +95,10 @@ public class JavaStructureParser {
         return structures;
     }
 
-    /**
-     * Удобный перегруз без резолвера — для мест, где индекс недоступен.
-     */
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
         return parse(sourceCode, sourceFile, contextLevel, NO_OP_RESOLVER);
     }
 
-    /**
-     * Собирает все типы, упомянутые в структуре класса.
-     */
     public Set<String> collectReferencedTypes(ClassStructure cs) {
         Set<String> types = new LinkedHashSet<>();
 
@@ -158,8 +143,6 @@ public class JavaStructureParser {
         String simpleName = typeDecl.getNameAsString();
         String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
 
-        // Регистрируем прямые nested типы: SimpleName → OuterQName.SimpleName
-        // putIfAbsent — явный import / sibling имеют приоритет
         for (BodyDeclaration<?> member : typeDecl.getMembers()) {
             if (member instanceof TypeDeclaration<?> nestedType) {
                 String nestedSimple = nestedType.getNameAsString();
@@ -332,9 +315,11 @@ public class JavaStructureParser {
      * <p>Порядок шагов:
      * <ol>
      *   <li>Explicit import (+ sibling/nested через putIfAbsent).</li>
-     *   <li>Wildcard resolver — если есть wildcard-импорты.</li>
-     *   <li>Same-package fallback — если wildcard-импортов нет вовсе.</li>
-     *   <li>Частично-квалифицированный тип (Outer.Inner) — если Outer есть в importMap.</li>
+     *   <li>Wildcard resolver — если есть wildcard-импорты и base без точки.</li>
+     *   <li>Same-package fallback — если wildcard-импортов нет вовсе и base без точки.</li>
+     *   <li>Outer.Inner, Outer есть в importMap — подставляем qualified префикс Outer.</li>
+     *   <li>Outer.Inner, Outer начинается с заглавной и пакет известен —
+     *       same-package fallback к всему выражению.</li>
      *   <li>Возвращаем как есть.</li>
      * </ol>
      */
@@ -358,26 +343,34 @@ public class JavaStructureParser {
                 Optional<String> resolved = wildcardResolver.apply(base, wildcardPackages);
                 return resolved.map(q -> q + suffix).orElse(base + suffix);
             }
-
             // 3. Same-package fallback — только если wildcard-импортов нет вовсе
             if (!filePackage.isEmpty()) {
                 return filePackage + "." + base + suffix;
             }
         }
 
-        // 4. Частично-квалифицированный тип: Outer.Inner[…] — если Outer есть в importMap.
-        // Работает для любой глубины: Outer.Inner, Outer.Inner.Deep…
-        // fully-qualified типы (com.example.Foo) не затрагиваются, т.к. "com" нет в importMap.
-        int dot = base.indexOf('.');
-        if (dot > 0) {
+        if (base.contains(".")) {
+            int dot = base.indexOf('.');
             String outerSimple = base.substring(0, dot);
             String rest = base.substring(dot); // ".Inner" или ".Inner.Deep"
+
+            // 4. Outer есть в importMap (явный import или sibling-тип того же файла)
             if (importMap.containsKey(outerSimple)) {
                 return importMap.get(outerSimple) + rest + suffix;
             }
+
+            // 5. Outer не в importMap, но начинается с заглавной и пакет известен
+            //    → это Outer из того же пакета (other file, no explicit import)
+            //    Пример: Ввод_Новой_записи.Вкладка → forms.credit.X.Ввод_Новой_записи.Вкладка
+            //    Защита: outerSimple должна начинаться с заглавной (имя класса, не пакет)
+            if (!filePackage.isEmpty()
+                    && !outerSimple.isEmpty()
+                    && Character.isUpperCase(outerSimple.charAt(0))) {
+                return filePackage + "." + base + suffix;
+            }
         }
 
-        // 5. Возвращаем как есть
+        // 6. Возвращаем как есть
         return raw;
     }
 
