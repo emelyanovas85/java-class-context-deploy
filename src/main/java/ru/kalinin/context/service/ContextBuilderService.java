@@ -126,7 +126,6 @@ public class ContextBuilderService {
 
             for (String qName : referencedTypes) {
                 // 1. Поиск в репозитории: сначала точный, затем откусывание сегментов
-                //    (Outer.Inner → ищем Outer.java, запоминаем qName в processedQNames)
                 Optional<Map.Entry<String, String>> repoSource =
                         findRepoSourceForType(qName, fileIndex,
                                 request.gitlabUrl(), request.token(),
@@ -160,29 +159,20 @@ public class ContextBuilderService {
     // -------------------------------------------------------------------------
 
     /**
-     * Ищет файл источника для {@code qName} в репозитории.
-     *
-     * <p>Алгоритм:
-     * <ol>
-     *   <li>Точный поиск: {@code findJavaFileByQualifiedName(fileIndex, qName)}.</li>
-     *   <li>Если не нашёл — последовательно откусываем последний сегмент qName
-     *       и повторяем поиск. Это покрывает случай
-     *       {@code forms.credit.X.Ввод_Новой_записи.ВкладкаРевизитыЗаявления}:
-     *       outer часть {@code forms.credit.X.Ввод_Новой_записи} найдётся
-     *       как файл в индексе.</li>
-     *   <li>Исходный {@code qName} (сх вложенным типом) добавляется в
-     *       {@code processedQNames} сразу, чтобы не повторять попытку
-     *       резолвера на следующем уровне.</li>
-     * </ol>
+     * Ищет файл источника для {@code qName} в репозитории: сначала точный поиск,
+     * затем последовательное откусывание правых сегментов для Outer.Inner-типов.
+     * При нахождении outer-класса исходный {@code qName} помечается
+     * как обработанный в {@code processedQNames}.
      */
     private Optional<Map.Entry<String, String>> findRepoSourceForType(
             String qName,
             Map<String, List<String>> fileIndex,
-            String gitlabUrl, String token, int projectId, String branch,
+            String gitlabUrl, String token, String projectId, String branch,
             Set<String> processedQNames) {
 
         // Точный поиск
-        Optional<Map.Entry<String, String>> exact = readRepoFile(qName, fileIndex, gitlabUrl, token, projectId, branch);
+        Optional<Map.Entry<String, String>> exact =
+                readRepoFile(qName, fileIndex, gitlabUrl, token, projectId, branch);
         if (exact.isPresent()) return exact;
 
         // Последовательное откусывание правого сегмента
@@ -192,7 +182,6 @@ public class ContextBuilderService {
             Optional<Map.Entry<String, String>> found =
                     readRepoFile(candidate, fileIndex, gitlabUrl, token, projectId, branch);
             if (found.isPresent()) {
-                // Исходный qName (с вложенным типом) помечаем как обработанный
                 processedQNames.add(qName);
                 log.debug("Type '{}' resolved via outer class '{}'", qName, candidate);
                 return found;
@@ -207,7 +196,7 @@ public class ContextBuilderService {
     private Optional<Map.Entry<String, String>> readRepoFile(
             String qName,
             Map<String, List<String>> fileIndex,
-            String gitlabUrl, String token, int projectId, String branch) {
+            String gitlabUrl, String token, String projectId, String branch) {
         return gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
                 .flatMap(filePath -> gitLabService.readFileContent(
                         gitlabUrl, token, projectId, branch, filePath)
@@ -218,9 +207,6 @@ public class ContextBuilderService {
     // Wildcard resolver
     // -------------------------------------------------------------------------
 
-    /**
-     * Строит лямбду-резолвер для wildcard-импортов.
-     */
     private BiFunction<String, List<String>, Optional<String>> buildWildcardResolver(
             Map<String, List<String>> fileIndex,
             Map<String, Path> dependencySources) {
