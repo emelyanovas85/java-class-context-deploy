@@ -19,24 +19,21 @@ import java.util.function.BiFunction;
 /**
  * Парсит Java-исходники с помощью JavaParser и строит {@link ClassStructure}.
  *
- * <h3>resolveType работает в четыре шага</h3>
+ * <h3>resolveType работает в пять шагов</h3>
  * <ol>
  *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
- *   <li><b>Sibling / nested type</b>: перед построением структур в {@code importMap}
- *       регистрируются:
- *       <ul>
- *         <li>все top-level типы файла (sibling non-public классы, например
- *             {@code Отчеты_депозитариев_Objects} в том же .java что и главный класс);</li>
- *         <li>прямые nested типы каждого обрабатываемого класса
- *             ({@code SimpleName → OuterQName.SimpleName}).</li>
- *       </ul>
- *       {@code putIfAbsent} — явный import всегда имеет приоритет.</li>
+ *   <li><b>Sibling / nested type</b>: все top-level типы файла и прямые nested типы
+ *       каждого класса зарегистрированы в {@code importMap} через {@code putIfAbsent}.</li>
  *   <li><b>Wildcard resolver</b>: если есть {@code import pkg.*} —
  *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.
  *       Если не нашёл — оставляет simple name.</li>
  *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
  *       добавляет префикс пакета файла.</li>
- *   <li>Возвращает как есть (встроенные, void, already-qualified).</li>
+ *   <li><b>Частично-квалифицированный тип</b> ({@code Outer.Inner}): если левая часть
+ *       ({@code Outer}) есть в {@code importMap} — подставляем префикс.
+ *       Например: {@code Сообщение.Имена_Диалоговых_Окон} →
+ *       {@code forms.general.dialog.Сообщение.Имена_Диалоговых_Окон}.</li>
+ *   <li>Возвращает как есть (встроенные, void, already fully-qualified).</li>
  * </ol>
  *
  * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
@@ -91,8 +88,6 @@ public class JavaStructureParser {
         List<String> wildcardPackages = buildWildcardPackages(cu);
 
         // Регистрируем все top-level типы файла (sibling non-public классы).
-        // Это позволяет resolveType найти их на шаге 1 (импорт) вместо same-package fallback,
-        // чтобы qualified name формировался как packageName.SimpleName.
         // putIfAbsent — явный import всегда имеет приоритет.
         for (TypeDeclaration<?> td : cu.getTypes()) {
             String tdSimple = td.getNameAsString();
@@ -163,8 +158,7 @@ public class JavaStructureParser {
         String simpleName = typeDecl.getNameAsString();
         String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
 
-        // Регистрируем прямые nested типы в importMap:
-        // SimpleName → OuterQName.SimpleName
+        // Регистрируем прямые nested типы: SimpleName → OuterQName.SimpleName
         // putIfAbsent — явный import / sibling имеют приоритет
         for (BodyDeclaration<?> member : typeDecl.getMembers()) {
             if (member instanceof TypeDeclaration<?> nestedType) {
@@ -334,6 +328,15 @@ public class JavaStructureParser {
 
     /**
      * Резолвит тип в qualified name.
+     *
+     * <p>Порядок шагов:
+     * <ol>
+     *   <li>Explicit import (+ sibling/nested через putIfAbsent).</li>
+     *   <li>Wildcard resolver — если есть wildcard-импорты.</li>
+     *   <li>Same-package fallback — если wildcard-импортов нет вовсе.</li>
+     *   <li>Частично-квалифицированный тип (Outer.Inner) — если Outer есть в importMap.</li>
+     *   <li>Возвращаем как есть.</li>
+     * </ol>
      */
     private String resolveType(Type type,
                                Map<String, String> importMap,
@@ -344,7 +347,7 @@ public class JavaStructureParser {
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
 
-        // 1. Explicit import (+ sibling и nested типы зарегистрированы через putIfAbsent)
+        // 1. Explicit import (+ sibling/nested зарегистрированы через putIfAbsent)
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
         }
@@ -362,7 +365,19 @@ public class JavaStructureParser {
             }
         }
 
-        // 4. Возвращаем как есть
+        // 4. Частично-квалифицированный тип: Outer.Inner[…] — если Outer есть в importMap.
+        // Работает для любой глубины: Outer.Inner, Outer.Inner.Deep…
+        // fully-qualified типы (com.example.Foo) не затрагиваются, т.к. "com" нет в importMap.
+        int dot = base.indexOf('.');
+        if (dot > 0) {
+            String outerSimple = base.substring(0, dot);
+            String rest = base.substring(dot); // ".Inner" или ".Inner.Deep"
+            if (importMap.containsKey(outerSimple)) {
+                return importMap.get(outerSimple) + rest + suffix;
+            }
+        }
+
+        // 5. Возвращаем как есть
         return raw;
     }
 
