@@ -14,26 +14,40 @@ import org.springframework.stereotype.Component;
 import ru.kalinin.context.model.*;
 
 import java.util.*;
+import java.util.function.BiFunction;
 
 /**
  * Парсит Java-исходники с помощью JavaParser и строит {@link ClassStructure}.
  *
- * <p>resolveType работает в четыре шага:</p>
+ * <h3>resolveType работает в четыре шага</h3>
  * <ol>
- *   <li>explicit import: {@code import com.example.Foo} → {@code com.example.Foo}</li>
- *   <li>wildcard imports: {@code import userInterface.*} → тип помечается как
- *       неоднозначный (simple name сохраняется без пакета, чтобы {@code ContextBuilderService}
- *       мог найти его в {@code dependencySources} по simple name или перебрать варианты)</li>
- *   <li>тот же пакет: если не найден ни в explicit, ни в wildcard — добавляет префикс пакета файла</li>
- *   <li>возвращает simple name как есть (встроенные, void и т.д.)</li>
+ *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
+ *   <li><b>Wildcard resolver</b>: если есть {@code import pkg.*} —
+ *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.
+ *       Резолвер ищет класс в {@code fileIndex} и {@code dependencySources}
+ *       и возвращает qualified name, если нашёл ровно одного кандидата.
+ *       Если не нашёл — оставляет simple name (чтобы не прилеплять пакет файла).</li>
+ *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
+ *       добавляет префикс пакета файла.</li>
+ *   <li>Возвращает как есть (встроенные, void, already-qualified).</li>
  * </ol>
  *
+ * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
+ * {@link #parse} и не хранится в полях компонента.
+ *
  * <p>Множество java.lang-типов строится динамически через
- * {@link JavaLangTypeRegistry#NAMES} — сканирует пакет через Module API.
+ * {@link JavaLangTypeRegistry#NAMES}.
  */
 @Slf4j
 @Component
 public class JavaStructureParser {
+
+    /**
+     * Резолвер wildcard-импортов, не делающий ничего (для вызовов без индекса).
+     * Сигнатура: (simpleName, wildcardPackages) → Optional&lt;qualifiedName&gt;
+     */
+    public static final BiFunction<String, List<String>, Optional<String>> NO_OP_RESOLVER =
+            (simpleName, pkgs) -> Optional.empty();
 
     private final JavaParser parser;
 
@@ -50,11 +64,14 @@ public class JavaStructureParser {
     /**
      * Парсит исходник и возвращает список структур всех классов верхнего уровня.
      *
-     * @param sourceCode   содержимое .java файла
-     * @param sourceFile   путь к файлу (для метаданных)
-     * @param contextLevel уровень контекста (0 = изменённый, 1+ = зависимость)
+     * @param sourceCode       содержимое .java файла
+     * @param sourceFile       путь к файлу (для метаданных)
+     * @param contextLevel     уровень контекста (0 = изменённый, 1+ = зависимость)
+     * @param wildcardResolver (симпль имя, список wildcard-пакетов) → qualified name;
+     *                         если не нужен, используйте {@link #NO_OP_RESOLVER}
      */
-    public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
+    public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel,
+                                      BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
         ParseResult<CompilationUnit> result = parser.parse(sourceCode);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
             log.warn("Failed to parse {}: {}", sourceFile, result.getProblems());
@@ -72,13 +89,22 @@ public class JavaStructureParser {
         List<ClassStructure> structures = new ArrayList<>();
         for (TypeDeclaration<?> typeDecl : cu.getTypes()) {
             structures.add(buildClassStructure(
-                    typeDecl, packageName, importMap, wildcardPackages, packageName, sourceFile, contextLevel));
+                    typeDecl, packageName, importMap, wildcardPackages,
+                    wildcardResolver, packageName, sourceFile, contextLevel));
         }
         return structures;
     }
 
     /**
-     * Собирает все типы, упомянутые в структуре класса (для построения следующего уровня контекста).
+     * Удобный перегруз без резолвера — для мест, где индекс недоступен
+     * (например, парсинг из sources.jar зависимостей).
+     */
+    public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
+        return parse(sourceCode, sourceFile, contextLevel, NO_OP_RESOLVER);
+    }
+
+    /**
+     * Собирает все типы, упомянутые в структуре класса.
      */
     public Set<String> collectReferencedTypes(ClassStructure cs) {
         Set<String> types = new LinkedHashSet<>();
@@ -117,6 +143,7 @@ public class JavaStructureParser {
                                                String packageName,
                                                Map<String, String> importMap,
                                                List<String> wildcardPackages,
+                                               BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                                String filePackage,
                                                String sourceFile,
                                                int contextLevel) {
@@ -134,35 +161,41 @@ public class JavaStructureParser {
         if (typeDecl instanceof ClassOrInterfaceDeclaration coid) {
             typeParameters = coid.getTypeParameters().stream().map(Object::toString).toList();
             if (!coid.getExtendedTypes().isEmpty()) {
-                extendedType = resolveType(coid.getExtendedTypes().get(0), importMap, wildcardPackages, filePackage);
+                extendedType = resolveType(coid.getExtendedTypes().get(0),
+                        importMap, wildcardPackages, wildcardResolver, filePackage);
             }
             implementedTypes = coid.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap, wildcardPackages, filePackage)).toList();
+                    .map(t -> resolveType(t, importMap, wildcardPackages, wildcardResolver, filePackage))
+                    .toList();
 
         } else if (typeDecl instanceof RecordDeclaration rd) {
             typeParameters = rd.getTypeParameters().stream().map(Object::toString).toList();
             implementedTypes = rd.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap, wildcardPackages, filePackage)).toList();
+                    .map(t -> resolveType(t, importMap, wildcardPackages, wildcardResolver, filePackage))
+                    .toList();
 
         } else if (typeDecl instanceof EnumDeclaration ed) {
             implementedTypes = ed.getImplementedTypes().stream()
-                    .map(t -> resolveType(t, importMap, wildcardPackages, filePackage)).toList();
+                    .map(t -> resolveType(t, importMap, wildcardPackages, wildcardResolver, filePackage))
+                    .toList();
         }
 
         List<FieldInfo> fields = typeDecl.getFields().stream()
-                .flatMap(fd -> extractFields(fd, importMap, wildcardPackages, filePackage).stream())
+                .flatMap(fd -> extractFields(fd, importMap, wildcardPackages, wildcardResolver, filePackage).stream())
                 .toList();
 
         List<MethodInfo> methods = new ArrayList<>();
-        typeDecl.getMethods().forEach(md -> methods.add(extractMethod(md, importMap, wildcardPackages, filePackage)));
-        typeDecl.getConstructors().forEach(cd -> methods.add(extractConstructor(cd, importMap, wildcardPackages, filePackage)));
+        typeDecl.getMethods().forEach(md ->
+                methods.add(extractMethod(md, importMap, wildcardPackages, wildcardResolver, filePackage)));
+        typeDecl.getConstructors().forEach(cd ->
+                methods.add(extractConstructor(cd, importMap, wildcardPackages, wildcardResolver, filePackage)));
 
         if (typeDecl instanceof RecordDeclaration rd) {
             List<FieldInfo> recordComponents = rd.getParameters().stream()
                     .map(p -> new FieldInfo(
                             extractAnnotations(p.getAnnotations()),
                             List.of(),
-                            resolveType(p.getType(), importMap, wildcardPackages, filePackage),
+                            resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, filePackage),
                             p.getNameAsString(),
                             null))
                     .toList();
@@ -174,7 +207,9 @@ public class JavaStructureParser {
         List<ClassStructure> nested = typeDecl.getMembers().stream()
                 .filter(m -> m instanceof TypeDeclaration)
                 .map(m -> buildClassStructure(
-                        (TypeDeclaration<?>) m, qualifiedName, importMap, wildcardPackages, filePackage, sourceFile, contextLevel))
+                        (TypeDeclaration<?>) m, qualifiedName,
+                        importMap, wildcardPackages, wildcardResolver,
+                        filePackage, sourceFile, contextLevel))
                 .toList();
 
         return new ClassStructure(
@@ -187,11 +222,14 @@ public class JavaStructureParser {
     // Private: fields, methods, constructors
     // -------------------------------------------------------------------------
 
-    private List<FieldInfo> extractFields(FieldDeclaration fd, Map<String, String> importMap,
-                                          List<String> wildcardPackages, String pkg) {
+    private List<FieldInfo> extractFields(FieldDeclaration fd,
+                                          Map<String, String> importMap,
+                                          List<String> wildcardPackages,
+                                          BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                          String pkg) {
         List<AnnotationInfo> annotations = extractAnnotations(fd.getAnnotations());
         List<String> modifiers = extractModifiers(fd.getModifiers());
-        String type = resolveType(fd.getElementType(), importMap, wildcardPackages, pkg);
+        String type = resolveType(fd.getElementType(), importMap, wildcardPackages, wildcardResolver, pkg);
         return fd.getVariables().stream()
                 .map(v -> new FieldInfo(
                         annotations, modifiers, type, v.getNameAsString(),
@@ -199,27 +237,33 @@ public class JavaStructureParser {
                 .toList();
     }
 
-    private MethodInfo extractMethod(MethodDeclaration md, Map<String, String> importMap,
-                                     List<String> wildcardPackages, String pkg) {
+    private MethodInfo extractMethod(MethodDeclaration md,
+                                     Map<String, String> importMap,
+                                     List<String> wildcardPackages,
+                                     BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                     String pkg) {
         return new MethodInfo(
                 extractAnnotations(md.getAnnotations()),
                 extractModifiers(md.getModifiers()),
-                resolveType(md.getType(), importMap, wildcardPackages, pkg),
+                resolveType(md.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                 md.getNameAsString(),
                 md.getTypeParameters().stream().map(Object::toString).toList(),
                 md.getParameters().stream()
                         .map(p -> new ParameterInfo(
                                 extractAnnotations(p.getAnnotations()),
-                                resolveType(p.getType(), importMap, wildcardPackages, pkg),
+                                resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 p.getNameAsString(), p.isVarArgs()))
                         .toList(),
                 md.getThrownExceptions().stream()
-                        .map(e -> resolveType(e, importMap, wildcardPackages, pkg)).toList(),
+                        .map(e -> resolveType(e, importMap, wildcardPackages, wildcardResolver, pkg)).toList(),
                 false);
     }
 
-    private MethodInfo extractConstructor(ConstructorDeclaration cd, Map<String, String> importMap,
-                                          List<String> wildcardPackages, String pkg) {
+    private MethodInfo extractConstructor(ConstructorDeclaration cd,
+                                          Map<String, String> importMap,
+                                          List<String> wildcardPackages,
+                                          BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                          String pkg) {
         return new MethodInfo(
                 extractAnnotations(cd.getAnnotations()),
                 extractModifiers(cd.getModifiers()),
@@ -229,11 +273,11 @@ public class JavaStructureParser {
                 cd.getParameters().stream()
                         .map(p -> new ParameterInfo(
                                 extractAnnotations(p.getAnnotations()),
-                                resolveType(p.getType(), importMap, wildcardPackages, pkg),
+                                resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 p.getNameAsString(), p.isVarArgs()))
                         .toList(),
                 cd.getThrownExceptions().stream()
-                        .map(e -> resolveType(e, importMap, wildcardPackages, pkg)).toList(),
+                        .map(e -> resolveType(e, importMap, wildcardPackages, wildcardResolver, pkg)).toList(),
                 true);
     }
 
@@ -241,10 +285,6 @@ public class JavaStructureParser {
     // Private: import map & type resolution
     // -------------------------------------------------------------------------
 
-    /**
-     * Строит карту simple name → qualified name из single-type import-деклараций файла.
-     * Wildcard-импорты ({@code import pkg.*}) в эту карту не входят — они хранятся отдельно.
-     */
     private Map<String, String> buildImportMap(CompilationUnit cu) {
         Map<String, String> map = new LinkedHashMap<>();
         for (ImportDeclaration imp : cu.getImports()) {
@@ -259,10 +299,6 @@ public class JavaStructureParser {
         return map;
     }
 
-    /**
-     * Возвращает список пакетов из wildcard-импортов файла ({@code import pkg.*}).
-     * Static wildcard-импорты игнорируются.
-     */
     private List<String> buildWildcardPackages(CompilationUnit cu) {
         List<String> packages = new ArrayList<>();
         for (ImportDeclaration imp : cu.getImports()) {
@@ -276,17 +312,17 @@ public class JavaStructureParser {
     /**
      * Резолвит тип в qualified name:
      * <ol>
-     *   <li>Explicit import map: {@code import com.example.Foo} → {@code com.example.Foo}</li>
-     *   <li>Wildcard imports: {@code import userInterface.*} →
-     *       если тип simple и есть хотя бы один wildcard-пакет — берём первый подходящий.
-     *       Если wildcard-пакетов несколько, в лог пишется предупреждение об амбигуаторности
-     *       (разрешить однозначно без classpath невозможно).</li>
-     *   <li>Same-package fallback: тип не встроенный и не java.* → добавляем префикс пакета файла.</li>
-     *   <li>Возвращаем как есть (встроенные, void, already-qualified).</li>
+     *   <li>Explicit import.</li>
+     *   <li>wildcardResolver(simpleName, wildcardPackages) — если есть wildcard-импорты.</li>
+     *   <li>Same-package fallback — только если wildcard-импортов нет вовсе.</li>
+     *   <li>Возвращаем как есть.</li>
      * </ol>
      */
-    private String resolveType(Type type, Map<String, String> importMap,
-                               List<String> wildcardPackages, String filePackage) {
+    private String resolveType(Type type,
+                               Map<String, String> importMap,
+                               List<String> wildcardPackages,
+                               BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                               String filePackage) {
         String raw = type.asString();
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
@@ -297,16 +333,15 @@ public class JavaStructureParser {
         }
 
         if (!base.contains(".") && !isBuiltinOrJavaLangType(base)) {
-            // 2. Wildcard imports
+            // 2. Wildcard resolver
             if (!wildcardPackages.isEmpty()) {
-                if (wildcardPackages.size() > 1) {
-                    log.debug("Ambiguous wildcard resolution for type '{}': candidates are {}", base, wildcardPackages);
-                }
-                // Берём первый wildcard-пакет — лучшее, что можно сделать без classpath
-                return wildcardPackages.get(0) + "." + base + suffix;
+                Optional<String> resolved = wildcardResolver.apply(base, wildcardPackages);
+                // resolved.empty() — не нашли / амбигуация: оставляем simple name,
+                // чтобы не прилеплять пакет текущего файла.
+                return resolved.map(q -> q + suffix).orElse(base + suffix);
             }
 
-            // 3. Same-package fallback
+            // 3. Same-package fallback — только если wildcard-импортов нет вовсе
             if (!filePackage.isEmpty()) {
                 return filePackage + "." + base + suffix;
             }
@@ -367,13 +402,6 @@ public class JavaStructureParser {
         }
     }
 
-    /**
-     * Тип является встроенным/java.lang.* если:
-     * - примитив, void или var;
-     * - simple name есть в {@link JavaLangTypeRegistry#NAMES} (java.lang.*);
-     * - qualified name начинается с java.* / javax.* / jakarta.* / sun.*;
-     * - массив ([]).
-     */
     private boolean isBuiltinOrJavaLangType(String type) {
         if (type == null || type.isBlank()) return true;
         return switch (type) {

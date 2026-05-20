@@ -11,28 +11,21 @@ import ru.kalinin.context.parser.StructureNodeMapper;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.BiFunction;
 
 /**
  * Основной сервис: строит многоуровневый контекст для мёрж-реквеста.
  *
  * <h3>Алгоритм</h3>
  * <ol>
- *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
- *   <li>Построение мёрженного файлового индекса: target + patch из diff MR.</li>
- *   <li>Сбор карты зависимостей: qualified name → путь к jar на диске.</li>
- *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
- *       для каждого строим пару structureSource / structureTarget.</li>
- *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR. Порядок поиска для каждого qName:
- *       <ol>
- *         <li>Точный поиск в репозитории по qualified name (fileIndex).</li>
- *         <li>Точный поиск в sources.jar (dependencySources) по qualified name.</li>
- *         <li>Поиск по simple name (последний сегмент) в fileIndex —
- *             решает wildcard-импорты из проекта.</li>
- *         <li>Поиск по simple name в dependencySources —
- *             решает wildcard-импорты из зависимостей.</li>
- *       </ol>
- *       Если на любом шаге найдено более одного кандидата — пропускаем с предупреждением.</li>
- *   </ol>
+ *   <li>Проверка состояния MR.</li>
+ *   <li>Построение мёрженного файлового индекса.</li>
+ *   <li>Сбор карты зависимостей: qualified name → путь к jar.</li>
+ *   <li>Сборка wildcardResolver: при парсинге каждого файла передаётся лямбда,
+ *       которая резолвит (simpleName, wildcardPackages) → qualified name,
+ *       используя fileIndex и dependencySources.</li>
+ *   <li>Уровень 0: изменённые файлы.</li>
+ *   <li>Уровни 1..depth: зависимости, поиск по exact qualified name в repo и jar.</li>
  * </ol>
  */
 @Slf4j
@@ -40,7 +33,6 @@ import java.util.*;
 @RequiredArgsConstructor
 public class ContextBuilderService {
 
-    /** Состояния MR, при которых анализ возможен. */
     private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
 
     private final GitLabService gitLabService;
@@ -73,6 +65,11 @@ public class ContextBuilderService {
         );
         log.info("Dependency context: {} known external class names", dependencySources.size());
 
+        // Лямбда-резолвер wildcard-импортов: (simpleName, wildcardPackages) → Optional<qualifiedName>.
+        // Строится один раз для всего buildContext(), передаётся в parse().
+        BiFunction<String, List<String>, Optional<String>> wildcardResolver =
+                buildWildcardResolver(fileIndex, dependencySources);
+
         List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
@@ -85,7 +82,6 @@ public class ContextBuilderService {
                     request.gitlabUrl(), request.token(),
                     request.projectId(), sourceBranch, filePath
             );
-
             Optional<String> targetContent = gitLabService.readFileContent(
                     request.gitlabUrl(), request.token(),
                     request.projectId(), targetBranch, filePath
@@ -93,12 +89,12 @@ public class ContextBuilderService {
 
             if (sourceContent.isPresent() && targetContent.isEmpty())
                 log.debug("{} exists only in {} (just created)", filePath, sourceBranch);
-
             if (sourceContent.isEmpty() && targetContent.isPresent())
                 log.debug("{} exists only in {} (just deleted)", filePath, targetContent);
 
             sourceContent.ifPresent(src -> {
-                List<ClassStructure> parsed = structureParser.parse(src, filePath, 0);
+                List<ClassStructure> parsed =
+                        structureParser.parse(src, filePath, 0, wildcardResolver);
                 List<StructureNode> srcNodes = nodeMapper.map(src, filePath);
                 List<StructureNode> tgtNodes = targetContent
                         .map(tgt -> nodeMapper.map(tgt, filePath))
@@ -129,8 +125,7 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
-
-                // Шаг 1: точный поиск в репозитории по qualified name
+                // 1. Точный поиск в репозитории
                 Optional<Map.Entry<String, String>> repoSource =
                         gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
                                 .flatMap(filePath -> gitLabService.readFileContent(
@@ -139,57 +134,16 @@ public class ContextBuilderService {
                                         .map(content -> Map.entry(filePath, content)));
 
                 if (repoSource.isPresent()) {
-                    addFromRepoSource(repoSource.get(), finalDepth, nextLevel,
-                            processedQNames, allContexts);
+                    addFromRepoSource(repoSource.get(), finalDepth, wildcardResolver,
+                            nextLevel, processedQNames, allContexts);
                     continue;
                 }
 
-                // Шаг 2: точный поиск в dependencySources по qualified name
+                // 2. Точный поиск в dependencySources
                 Path jarPath = dependencySources.get(qName);
                 if (jarPath != null) {
-                    addFromJar(jarPath, qName, finalDepth, nextLevel, processedQNames, allContexts);
-                    continue;
-                }
-
-                // Шаги 3–4: поиск по simple name — решает wildcard-импорты
-                String simpleName = simpleName(qName);
-
-                // Шаг 3: wildcard в репозитории — ищем файл, чей имя совпадает с simpleName
-                List<String> repoWildcardPaths = gitLabService.findJavaFilesBySimpleName(fileIndex, simpleName);
-                if (!repoWildcardPaths.isEmpty()) {
-                    if (repoWildcardPaths.size() > 1) {
-                        log.warn("Ambiguous wildcard resolution for '{}' in repo: candidates={} — skipping",
-                                qName, repoWildcardPaths);
-                        continue;
-                    }
-                    String resolvedPath = repoWildcardPaths.get(0);
-                    Optional<Map.Entry<String, String>> wildcardRepoSource =
-                            gitLabService.readFileContent(
-                                    request.gitlabUrl(), request.token(),
-                                    request.projectId(), sourceBranch, resolvedPath)
-                                    .map(content -> Map.entry(resolvedPath, content));
-                    if (wildcardRepoSource.isPresent()) {
-                        log.debug("Resolved wildcard '{}' → repo file '{}'", qName, resolvedPath);
-                        addFromRepoSource(wildcardRepoSource.get(), finalDepth, nextLevel,
-                                processedQNames, allContexts);
-                        continue;
-                    }
-                }
-
-                // Шаг 4: wildcard в dependencySources — ищем ключи с тем же simpleName
-                List<String> depWildcardKeys = dependencySources.keySet().stream()
-                        .filter(k -> simpleName(k).equals(simpleName))
-                        .toList();
-                if (!depWildcardKeys.isEmpty()) {
-                    if (depWildcardKeys.size() > 1) {
-                        log.warn("Ambiguous wildcard resolution for '{}' in dependency sources: candidates={} — skipping",
-                                qName, depWildcardKeys);
-                        continue;
-                    }
-                    String resolvedQName = depWildcardKeys.get(0);
-                    Path resolvedJar = dependencySources.get(resolvedQName);
-                    log.debug("Resolved wildcard '{}' → dependency class '{}'", qName, resolvedQName);
-                    addFromJar(resolvedJar, resolvedQName, finalDepth, nextLevel, processedQNames, allContexts);
+                    addFromJar(jarPath, qName, finalDepth, wildcardResolver,
+                            nextLevel, processedQNames, allContexts);
                     continue;
                 }
 
@@ -203,15 +157,98 @@ public class ContextBuilderService {
     }
 
     // -------------------------------------------------------------------------
+    // Wildcard resolver
+    // -------------------------------------------------------------------------
+
+    /**
+     * Строит лямбду-резолвер для wildcard-импортов.
+     *
+     * <p>Алгоритм:
+     * <ol>
+     *   <li>Ищем в {@code fileIndex} файлы {@code SimpleName.java}
+     *       в папках, совпадающих с одним из wildcardPackages.</li>
+     *   <li>Ищем в ключах {@code dependencySources}
+     *       записи, qualified name которых заканчивается на {@code .<simpleName>}
+     *       и пакет есть в wildcardPackages.</li>
+     *   <li>Если найден ровно один кандидат — возвращаем его qualified name.
+     *       Если ни одного кандидата / амбигуация — {@code Optional.empty()},
+     *       при амбигуации пишем warn в лог.</li>
+     * </ol>
+     */
+    private BiFunction<String, List<String>, Optional<String>> buildWildcardResolver(
+            Map<String, List<String>> fileIndex,
+            Map<String, Path> dependencySources) {
+
+        return (simpleName, wildcardPackages) -> {
+            List<String> candidates = new ArrayList<>();
+
+            // Ищем в fileIndex: путь вида "<wildcardPkg>/<simpleName>.java"
+            String fileName = simpleName + ".java";
+            List<String> filePaths = fileIndex.getOrDefault(fileName, List.of());
+            for (String path : filePaths) {
+                String dirPath = path.contains("/")
+                        ? path.substring(0, path.lastIndexOf('/'))
+                        : "";
+                // dirPath в виде "src/main/java/pkg/sub" — нужно извлечь пакет
+                String pkgFromPath = dirPathToPackage(dirPath);
+                if (wildcardPackages.contains(pkgFromPath)) {
+                    candidates.add(pkgFromPath + "." + simpleName);
+                }
+            }
+
+            // Ищем в dependencySources: ключ оканчивается на ".SimpleName"
+            // и пакет (без последнего сегмента) есть в wildcardPackages
+            if (candidates.isEmpty()) {
+                String suffix = "." + simpleName;
+                for (String qName : dependencySources.keySet()) {
+                    if (qName.endsWith(suffix)) {
+                        String pkg = qName.substring(0, qName.length() - suffix.length());
+                        if (wildcardPackages.contains(pkg)) {
+                            candidates.add(qName);
+                        }
+                    }
+                }
+            }
+
+            if (candidates.size() == 1) {
+                return Optional.of(candidates.get(0));
+            }
+            if (candidates.size() > 1) {
+                log.warn("Ambiguous wildcard resolution for '{}': candidates={} wildcards={}",
+                        simpleName, candidates, wildcardPackages);
+            }
+            return Optional.empty();
+        };
+    }
+
+    /**
+     * Преобразует путь директории в пакет Java.
+     * {@code src/main/java/com/example} → {@code com.example}
+     * {@code com/example} → {@code com.example}
+     */
+    private static String dirPathToPackage(String dirPath) {
+        // Убираем стандартные префиксы Maven/Gradle source roots
+        for (String prefix : List.of("src/main/java/", "src/test/java/", "src/main/kotlin/")) {
+            if (dirPath.startsWith(prefix)) {
+                dirPath = dirPath.substring(prefix.length());
+                break;
+            }
+        }
+        return dirPath.replace('/', '.');
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers: adding resolved sources to context
     // -------------------------------------------------------------------------
 
     private void addFromRepoSource(Map.Entry<String, String> source, int depth,
+                                   BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                    List<ClassStructure> nextLevel, Set<String> processedQNames,
                                    List<ClassContext> allContexts) {
         String filePath = source.getKey();
         String content = source.getValue();
-        List<ClassStructure> parsed = structureParser.parse(content, filePath, depth);
+        List<ClassStructure> parsed =
+                structureParser.parse(content, filePath, depth, wildcardResolver);
         List<StructureNode> nodes = nodeMapper.map(content, filePath);
 
         parsed.forEach(cs -> {
@@ -225,11 +262,13 @@ public class ContextBuilderService {
     }
 
     private void addFromJar(Path jarPath, String qName, int depth,
+                            BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                             List<ClassStructure> nextLevel, Set<String> processedQNames,
                             List<ClassContext> allContexts) {
         classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
             String syntheticPath = qName.replace('.', '/') + ".java";
-            List<ClassStructure> parsed = structureParser.parse(content, syntheticPath, depth);
+            List<ClassStructure> parsed =
+                    structureParser.parse(content, syntheticPath, depth, wildcardResolver);
             List<StructureNode> nodes = nodeMapper.map(content, syntheticPath);
 
             parsed.forEach(cs -> {
@@ -247,15 +286,6 @@ public class ContextBuilderService {
     // -------------------------------------------------------------------------
     // Helpers: misc
     // -------------------------------------------------------------------------
-
-    /**
-     * Возвращает последний сегмент qualified name («simple name»).
-     * Например: {@code Документы.Запрос} → {@code Запрос}.
-     */
-    private static String simpleName(String qName) {
-        int dot = qName.lastIndexOf('.');
-        return dot >= 0 ? qName.substring(dot + 1) : qName;
-    }
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {
