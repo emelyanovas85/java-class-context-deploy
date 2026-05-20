@@ -15,16 +15,24 @@ import java.util.*;
 /**
  * Основной сервис: строит многоуровневый контекст для мёрж-реквеста.
  *
- * <p>Алгоритм:
+ * <h3>Алгоритм</h3>
  * <ol>
  *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
  *   <li>Построение мёрженного файлового индекса: target + patch из diff MR.</li>
  *   <li>Сбор карты зависимостей: qualified name → путь к jar на диске.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
  *       для каждого строим пару structureSource / structureTarget.</li>
- *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
- *       Сначала ищем в репозитории (fileIndex), затем — в sources.jar на диске.
- *       Если зависимость сама изменилась в MR — она уже обработана на уровне 0.</li>
+ *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR. Порядок поиска для каждого qName:
+ *       <ol>
+ *         <li>Точный поиск в репозитории по qualified name (fileIndex).</li>
+ *         <li>Точный поиск в sources.jar (dependencySources) по qualified name.</li>
+ *         <li>Поиск по simple name (последний сегмент) в fileIndex —
+ *             решает wildcard-импорты из проекта.</li>
+ *         <li>Поиск по simple name в dependencySources —
+ *             решает wildcard-импорты из зависимостей.</li>
+ *       </ol>
+ *       Если на любом шаге найдено более одного кандидата — пропускаем с предупреждением.</li>
+ *   </ol>
  * </ol>
  */
 @Slf4j
@@ -54,14 +62,11 @@ public class ContextBuilderService {
         String sourceBranch = mrInfo.sourceBranch();
         String targetBranch = mrInfo.targetBranch();
 
-        // Индекс строится один раз и передаётся всем, кому он нужен
         Map<String, List<String>> fileIndex = gitLabService.buildMergedFileIndex(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), targetBranch, mrInfo.diffs()
         );
 
-        // Карта: qualified name → путь к jar на диске.
-        // Байты в памяти не удерживаются; jar кэшируется на диске между запросами.
         Map<String, Path> dependencySources = dependencyContextService.collectDependencySources(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), sourceBranch, fileIndex
@@ -124,7 +129,8 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
-                // 1. Ищем в репозитории проекта
+
+                // Шаг 1: точный поиск в репозитории по qualified name
                 Optional<Map.Entry<String, String>> repoSource =
                         gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
                                 .flatMap(filePath -> gitLabService.readFileContent(
@@ -133,54 +139,122 @@ public class ContextBuilderService {
                                         .map(content -> Map.entry(filePath, content)));
 
                 if (repoSource.isPresent()) {
-                    String filePath = repoSource.get().getKey();
-                    String content = repoSource.get().getValue();
-                    List<ClassStructure> parsed =
-                            structureParser.parse(content, filePath, finalDepth);
-                    List<StructureNode> nodes = nodeMapper.map(content, filePath);
-
-                    parsed.forEach(cs -> {
-                        if (!processedQNames.contains(cs.qualifiedName())) {
-                            processedQNames.add(cs.qualifiedName());
-                            nextLevel.add(cs);
-                            addNestedQNames(cs, processedQNames);
-                            allContexts.add(ClassContext.of(
-                                    cs.qualifiedName(), finalDepth, nodes, nodes));
-                        }
-                    });
+                    addFromRepoSource(repoSource.get(), finalDepth, nextLevel,
+                            processedQNames, allContexts);
                     continue;
                 }
 
-                // 2. Ищем в sources.jar зависимостей (jar лежит на диске)
+                // Шаг 2: точный поиск в dependencySources по qualified name
                 Path jarPath = dependencySources.get(qName);
-                if (jarPath == null) {
-                    log.debug("Type {} not found in repo or dependency sources — skipping", qName);
+                if (jarPath != null) {
+                    addFromJar(jarPath, qName, finalDepth, nextLevel, processedQNames, allContexts);
                     continue;
                 }
 
-                classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
-                    String syntheticPath = qName.replace('.', '/') + ".java";
-                    List<ClassStructure> parsed =
-                            structureParser.parse(content, syntheticPath, finalDepth);
-                    List<StructureNode> nodes = nodeMapper.map(content, syntheticPath);
+                // Шаги 3–4: поиск по simple name — решает wildcard-импорты
+                String simpleName = simpleName(qName);
 
-                    parsed.forEach(cs -> {
-                        if (!processedQNames.contains(cs.qualifiedName())) {
-                            processedQNames.add(cs.qualifiedName());
-                            nextLevel.add(cs);
-                            addNestedQNames(cs, processedQNames);
-                            allContexts.add(ClassContext.of(
-                                    cs.qualifiedName(), finalDepth, nodes, nodes));
-                        }
-                    });
-                    log.debug("Resolved {} from sources.jar on disk", qName);
-                });
+                // Шаг 3: wildcard в репозитории — ищем файл, чей имя совпадает с simpleName
+                List<String> repoWildcardPaths = gitLabService.findJavaFilesBySimpleName(fileIndex, simpleName);
+                if (!repoWildcardPaths.isEmpty()) {
+                    if (repoWildcardPaths.size() > 1) {
+                        log.warn("Ambiguous wildcard resolution for '{}' in repo: candidates={} — skipping",
+                                qName, repoWildcardPaths);
+                        continue;
+                    }
+                    String resolvedPath = repoWildcardPaths.get(0);
+                    Optional<Map.Entry<String, String>> wildcardRepoSource =
+                            gitLabService.readFileContent(
+                                    request.gitlabUrl(), request.token(),
+                                    request.projectId(), sourceBranch, resolvedPath)
+                                    .map(content -> Map.entry(resolvedPath, content));
+                    if (wildcardRepoSource.isPresent()) {
+                        log.debug("Resolved wildcard '{}' → repo file '{}'", qName, resolvedPath);
+                        addFromRepoSource(wildcardRepoSource.get(), finalDepth, nextLevel,
+                                processedQNames, allContexts);
+                        continue;
+                    }
+                }
+
+                // Шаг 4: wildcard в dependencySources — ищем ключи с тем же simpleName
+                List<String> depWildcardKeys = dependencySources.keySet().stream()
+                        .filter(k -> simpleName(k).equals(simpleName))
+                        .toList();
+                if (!depWildcardKeys.isEmpty()) {
+                    if (depWildcardKeys.size() > 1) {
+                        log.warn("Ambiguous wildcard resolution for '{}' in dependency sources: candidates={} — skipping",
+                                qName, depWildcardKeys);
+                        continue;
+                    }
+                    String resolvedQName = depWildcardKeys.get(0);
+                    Path resolvedJar = dependencySources.get(resolvedQName);
+                    log.debug("Resolved wildcard '{}' → dependency class '{}'", qName, resolvedQName);
+                    addFromJar(resolvedJar, resolvedQName, finalDepth, nextLevel, processedQNames, allContexts);
+                    continue;
+                }
+
+                log.debug("Type '{}' not found in repo or dependency sources — skipping", qName);
             }
 
             currentLevel = nextLevel;
         }
 
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers: adding resolved sources to context
+    // -------------------------------------------------------------------------
+
+    private void addFromRepoSource(Map.Entry<String, String> source, int depth,
+                                   List<ClassStructure> nextLevel, Set<String> processedQNames,
+                                   List<ClassContext> allContexts) {
+        String filePath = source.getKey();
+        String content = source.getValue();
+        List<ClassStructure> parsed = structureParser.parse(content, filePath, depth);
+        List<StructureNode> nodes = nodeMapper.map(content, filePath);
+
+        parsed.forEach(cs -> {
+            if (!processedQNames.contains(cs.qualifiedName())) {
+                processedQNames.add(cs.qualifiedName());
+                nextLevel.add(cs);
+                addNestedQNames(cs, processedQNames);
+                allContexts.add(ClassContext.of(cs.qualifiedName(), depth, nodes, nodes));
+            }
+        });
+    }
+
+    private void addFromJar(Path jarPath, String qName, int depth,
+                            List<ClassStructure> nextLevel, Set<String> processedQNames,
+                            List<ClassContext> allContexts) {
+        classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
+            String syntheticPath = qName.replace('.', '/') + ".java";
+            List<ClassStructure> parsed = structureParser.parse(content, syntheticPath, depth);
+            List<StructureNode> nodes = nodeMapper.map(content, syntheticPath);
+
+            parsed.forEach(cs -> {
+                if (!processedQNames.contains(cs.qualifiedName())) {
+                    processedQNames.add(cs.qualifiedName());
+                    nextLevel.add(cs);
+                    addNestedQNames(cs, processedQNames);
+                    allContexts.add(ClassContext.of(cs.qualifiedName(), depth, nodes, nodes));
+                }
+            });
+            log.debug("Resolved '{}' from sources.jar on disk", qName);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers: misc
+    // -------------------------------------------------------------------------
+
+    /**
+     * Возвращает последний сегмент qualified name («simple name»).
+     * Например: {@code Документы.Запрос} → {@code Запрос}.
+     */
+    private static String simpleName(String qName) {
+        int dot = qName.lastIndexOf('.');
+        return dot >= 0 ? qName.substring(dot + 1) : qName;
     }
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
