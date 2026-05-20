@@ -1,24 +1,30 @@
 package ru.kalinin.context.dependency;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Скачивает {@code *-sources.jar} из Artifactory.
+ * Скачивает {@code *-sources.jar} из Artifactory и сохраняет их на диск.
  *
- * <h3>Кэширование</h3>
- * <p>Скачанные jar-файлы кэшируются в памяти по {@link DependencyCoordinate}.
- * Повторный вызов {@link #downloadSourcesJar} для той же зависимости
- * возвращает результат из кэша без сетевого запроса.
+ * <h3>Кэширование на диске</h3>
+ * <p>Каждый скачанный jar сохраняется в директорию {@code artifactsDir}
+ * (по умолчанию {@code /artifacts}) под именем
+ * {@code <groupId>-<artifactId>-<version>-sources.jar}.
+ * При повторном запросе файл читается с диска без сетевого вызова.
+ * Байты в памяти не удерживаются — метод возвращает {@link Path}.
  *
  * <h3>Определение URL Artifactory</h3>
  * <p>Ищем все {@code http(s)://...artifactory...} URL во всех Gradle-файлах.
@@ -43,13 +49,22 @@ public class ArtifactorySourcesLoader {
             Pattern.CASE_INSENSITIVE
     );
 
-    /** Кэш: координаты зависимости → байты скачанного sources.jar. */
-    private final ConcurrentHashMap<DependencyCoordinate, byte[]> jarCache = new ConcurrentHashMap<>();
+    /** Директория для хранения скачанных jar-файлов. */
+    private final Path artifactsDir;
 
     private final RestClient restClient;
 
-    public ArtifactorySourcesLoader(RestClient.Builder restClientBuilder) {
+    public ArtifactorySourcesLoader(
+            RestClient.Builder restClientBuilder,
+            @Value("${app.artifacts-dir:/artifacts}") String artifactsDirPath) {
         this.restClient = restClientBuilder.build();
+        this.artifactsDir = Path.of(artifactsDirPath);
+        try {
+            Files.createDirectories(artifactsDir);
+            log.info("Artifacts directory: {}", artifactsDir.toAbsolutePath());
+        } catch (IOException e) {
+            log.warn("Cannot create artifacts directory {}: {}", artifactsDir, e.getMessage());
+        }
     }
 
     /**
@@ -81,28 +96,30 @@ public class ArtifactorySourcesLoader {
     }
 
     /**
-     * Возвращает байты {@code *-sources.jar} для указанной зависимости.
+     * Возвращает путь к локально сохранённому {@code *-sources.jar} для указанной зависимости.
      *
-     * <p>Результат кэшируется: повторный вызов для той же зависимости
-     * не выполняет сетевой запрос.
+     * <p>Если jar уже присутствует в {@code artifactsDir} — возвращает его путь без
+     * обращения к сети. Иначе скачивает, сохраняет на диск и возвращает путь.
+     * Байты в памяти после возврата не удерживаются.
      *
      * <p>Перебирает все переданные repo URL до первого успешного ответа.
      *
      * @param artifactoryRepoUrls список repo URL из {@link #detectArtifactoryUrls}
      * @param dep                 координаты зависимости (с явной версией)
-     * @return байты jar-файла или {@code Optional.empty()} если ни в одном репозитории не нашлось
+     * @return путь к jar-файлу на диске или {@code Optional.empty()} если не найдено
      */
-    public Optional<byte[]> downloadSourcesJar(List<String> artifactoryRepoUrls,
-                                               DependencyCoordinate dep) {
+    public Optional<Path> resolveSourcesJar(List<String> artifactoryRepoUrls,
+                                            DependencyCoordinate dep) {
         if (!dep.hasVersion()) {
             log.debug("Skipping BOM-managed dependency without version: {}", dep);
             return Optional.empty();
         }
 
-        byte[] cached = jarCache.get(dep);
-        if (cached != null) {
-            log.debug("sources.jar cache hit for: {}", dep);
-            return Optional.of(cached);
+        Path localPath = artifactsDir.resolve(localFileName(dep));
+
+        if (Files.exists(localPath)) {
+            log.debug("sources.jar cache hit (disk): {}", localPath);
+            return Optional.of(localPath);
         }
 
         String relativePath = dep.mavenRelativePath() + dep.sourcesJarName();
@@ -120,12 +137,16 @@ public class ArtifactorySourcesLoader {
                         .retrieve()
                         .body(byte[].class);
                 if (bytes != null && bytes.length > 0) {
-                    log.info("Downloaded sources.jar ({} bytes) from {}: {}", bytes.length, repoUrl, dep);
-                    jarCache.put(dep, bytes);
-                    return Optional.of(bytes);
+                    Files.write(localPath, bytes,
+                            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                    log.info("Downloaded and saved sources.jar ({} bytes) → {}: {}",
+                            bytes.length, localPath, dep);
+                    return Optional.of(localPath);
                 }
             } catch (RestClientException e) {
                 log.debug("Not found in {}: {} — {}", repoUrl, dep, e.getMessage());
+            } catch (IOException e) {
+                log.warn("Failed to save sources.jar for {} to {}: {}", dep, localPath, e.getMessage());
             }
         }
 
@@ -136,6 +157,17 @@ public class ArtifactorySourcesLoader {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Имя файла на диске: {@code groupId-artifactId-version-sources.jar}.
+     * Точки в groupId заменяются на дефисы для совместимости с ФС.
+     */
+    private static String localFileName(DependencyCoordinate dep) {
+        return dep.groupId().replace('.', '-')
+                + '-' + dep.artifactId()
+                + '-' + dep.version()
+                + "-sources.jar";
+    }
 
     /**
      * Удаляет замыкающие нежелательные символы с конца URL:

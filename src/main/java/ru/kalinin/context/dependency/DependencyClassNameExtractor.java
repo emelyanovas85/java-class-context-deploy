@@ -3,79 +3,68 @@ package ru.kalinin.context.dependency;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.HashMap;
-import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Извлекает полные имена Java-классов из байт {@code *-sources.jar}
- * и читает исходные файлы по qualified name.
+ * Извлекает полные имена Java-классов из {@code *-sources.jar} на диске
+ * и читает исходный код отдельного класса по qualified name.
  *
- * <p>Qualified name вычисляется из пути к {@code .java}-файлу:
+ * <p>Qualified name вычисляется из пути к {@code .java}-файлу внутри jar:
  * {@code com/example/Foo.java} → {@code com.example.Foo}.
  *
  * <p>Вложенные классы в индекс не попадают — только top-level.
- * Этого достаточно для фильтрации и резолвинга: вложенный класс
- * всегда находится в файле своего top-level-контейнера.
+ * Они всегда находятся в файле своего top-level-контейнера.
  */
 @Slf4j
 @Component
 public class DependencyClassNameExtractor {
 
     /**
-     * Разбирает bytes sources.jar и возвращает карту:
-     * qualified name → содержимое {@code .java}-файла.
+     * Читает jar с диска и возвращает множество qualified names всех top-level классов.
      *
-     * @param jarBytes байты jar-файла
+     * @param jarPath  путь к jar-файлу на диске
      * @param depLabel метка зависимости для логов
-     * @return карта qualified name → исходный код
+     * @return множество qualified names
      */
-    public Map<String, String> extractSources(byte[] jarBytes, String depLabel) {
-        Map<String, String> sources = new HashMap<>();
-
-        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(jarBytes))) {
+    public Set<String> extractClassNames(Path jarPath, String depLabel) {
+        Set<String> classNames = new HashSet<>();
+        try (ZipInputStream zip = openZip(jarPath)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
-                String entryName = entry.getName();
-                if (!entry.isDirectory() && entryName.endsWith(".java")) {
-                    String qualifiedName = entryName
-                            .replace('/', '.')
-                            .replace('\\', '.')
-                            .replaceAll("\\.java$", "");
-                    if (qualifiedName.endsWith("module-info")
-                            || qualifiedName.endsWith("package-info")) {
-                        continue;
+                String name = entry.getName();
+                if (!entry.isDirectory() && name.endsWith(".java")) {
+                    String qualifiedName = toQualifiedName(name);
+                    if (qualifiedName != null) {
+                        classNames.add(qualifiedName);
                     }
-                    String content = new String(zip.readAllBytes());
-                    sources.put(qualifiedName, content);
                 }
             }
         } catch (IOException e) {
             log.warn("Failed to read sources.jar for {}: {}", depLabel, e.getMessage());
         }
-
-        log.info("Extracted {} source entries from sources.jar of {}", sources.size(), depLabel);
-        return sources;
+        log.info("Extracted {} class names from sources.jar of {}", classNames.size(), depLabel);
+        return classNames;
     }
 
     /**
-     * Извлекает исходный код одного {@code .java}-файла из jar по qualified name.
+     * Читает jar с диска и возвращает содержимое {@code .java}-файла
+     * для указанного qualified name.
      *
-     * <p>Удобен когда нужен только один файл без построения полной карты.
-     *
-     * @param jarBytes      байты jar-файла
+     * @param jarPath       путь к jar-файлу на диске
      * @param qualifiedName например {@code org.springframework.web.bind.annotation.RestController}
      * @return содержимое .java файла или {@code Optional.empty()} если не найдено
      */
-    public Optional<String> extractSourceFile(byte[] jarBytes, String qualifiedName) {
+    public Optional<String> extractSourceFile(Path jarPath, String qualifiedName) {
         String targetEntry = qualifiedName.replace('.', '/') + ".java";
-
-        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(jarBytes))) {
+        try (ZipInputStream zip = openZip(jarPath)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
                 if (!entry.isDirectory() && entry.getName().equals(targetEntry)) {
@@ -85,15 +74,30 @@ public class DependencyClassNameExtractor {
         } catch (IOException e) {
             log.warn("Failed to read sources.jar while looking for {}: {}", qualifiedName, e.getMessage());
         }
-
         return Optional.empty();
     }
 
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private ZipInputStream openZip(Path jarPath) throws IOException {
+        InputStream is = Files.newInputStream(jarPath);
+        return new ZipInputStream(is);
+    }
+
     /**
-     * @deprecated Используйте {@link #extractSources(byte[], String)} и получайте keySet().
+     * Преобразует путь внутри zip в qualified name.
+     * Возвращает {@code null} для module-info и package-info.
      */
-    @Deprecated(forRemoval = true)
-    public java.util.Set<String> extractClassNames(byte[] jarBytes, String depLabel) {
-        return extractSources(jarBytes, depLabel).keySet();
+    private static String toQualifiedName(String entryName) {
+        String qName = entryName
+                .replace('/', '.')
+                .replace('\\', '.')
+                .replaceAll("\\.java$", "");
+        if (qName.endsWith("module-info") || qName.endsWith("package-info")) {
+            return null;
+        }
+        return qName;
     }
 }

@@ -9,6 +9,7 @@ import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
 import ru.kalinin.context.parser.StructureNodeMapper;
 
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -18,11 +19,11 @@ import java.util.*;
  * <ol>
  *   <li>Проверка состояния MR: только opened/locked проходят дальше.</li>
  *   <li>Построение мёрженного файлового индекса: target + patch из diff MR.</li>
- *   <li>Сбор карты зависимостей: qualified name → байты jar (с кэшированием).</li>
+ *   <li>Сбор карты зависимостей: qualified name → путь к jar на диске.</li>
  *   <li>Уровень 0: читаем изменённые .java-файлы из source-ветки,
  *       для каждого строим пару structureSource / structureTarget.</li>
  *   <li>Уровни N ≥ 1: зависимости, не входящие в diff MR.
- *       Сначала ищем в репозитории (fileIndex), затем — в sources.jar.
+ *       Сначала ищем в репозитории (fileIndex), затем — в sources.jar на диске.
  *       Если зависимость сама изменилась в MR — она уже обработана на уровне 0.</li>
  * </ol>
  */
@@ -59,9 +60,9 @@ public class ContextBuilderService {
                 request.projectId(), targetBranch, mrInfo.diffs()
         );
 
-        // Карта: qualified name → байты jar, в котором находится класс.
-        // Jar-файлы кэшируются в ArtifactorySourcesLoader между вызовами.
-        Map<String, byte[]> dependencySources = dependencyContextService.collectDependencySources(
+        // Карта: qualified name → путь к jar на диске.
+        // Байты в памяти не удерживаются; jar кэшируется на диске между запросами.
+        Map<String, Path> dependencySources = dependencyContextService.collectDependencySources(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), sourceBranch, fileIndex
         );
@@ -150,15 +151,14 @@ public class ContextBuilderService {
                     continue;
                 }
 
-                // 2. Ищем в sources.jar зависимостей
-                byte[] jarBytes = dependencySources.get(qName);
-                if (jarBytes == null) {
+                // 2. Ищем в sources.jar зависимостей (jar лежит на диске)
+                Path jarPath = dependencySources.get(qName);
+                if (jarPath == null) {
                     log.debug("Type {} not found in repo or dependency sources — skipping", qName);
                     continue;
                 }
 
-                classNameExtractor.extractSourceFile(jarBytes, qName).ifPresent(content -> {
-                    // Имя файла — последний сегмент qualified name
+                classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
                     String syntheticPath = qName.replace('.', '/') + ".java";
                     List<ClassStructure> parsed =
                             structureParser.parse(content, syntheticPath, finalDepth);
@@ -173,7 +173,7 @@ public class ContextBuilderService {
                                     cs.qualifiedName(), finalDepth, nodes, nodes));
                         }
                     });
-                    log.debug("Resolved {} from dependency sources.jar", qName);
+                    log.debug("Resolved {} from sources.jar on disk", qName);
                 });
             }
 

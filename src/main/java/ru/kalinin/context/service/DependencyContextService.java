@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.dependency.*;
 
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -16,12 +17,12 @@ import java.util.*;
  *   <li>Прочитать их содержимое.</li>
  *   <li>Найти все Artifactory repo URL из Gradle-файлов.</li>
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
- *   <li>Для каждой зависимости скачать sources.jar (с кэшированием) и извлечь исходники.</li>
+ *   <li>Для каждой зависимости получить путь к sources.jar на диске
+ *       (скачать если нет) и проиндексировать классы.</li>
  * </ol>
  *
- * <p>Результат — {@code Map<String, byte[]>}: qualified name класса → байты jar,
- * в котором этот класс находится. Это позволяет {@code ContextBuilderService}
- * резолвить исходный код любого типа прямо из jar.
+ * <p>Результат — {@code Map<String, Path>}: qualified name класса → путь к jar на диске.
+ * Байты jar в памяти не удерживаются.
  */
 @Slf4j
 @Service
@@ -34,19 +35,19 @@ public class DependencyContextService {
     private final DependencyClassNameExtractor classNameExtractor;
 
     /**
-     * Собирает карту «qualified name → байты jar» для всех классов из зависимостей.
+     * Собирает карту «qualified name → путь к jar на диске» для всех классов из зависимостей.
      *
-     * <p>Jar-файлы кэшируются в {@link ArtifactorySourcesLoader}: повторный вызов
-     * для того же MR или другого MR того же проекта не инициирует повторную загрузку.
+     * <p>Jar-файлы сохраняются в {@code /artifacts} и при повторном запросе
+     * берутся с диска без сетевого вызова.
      *
      * @param gitlabUrl URL GitLab-инстанса
      * @param token     токен доступа
      * @param projectId идентификатор проекта
      * @param branch    ветка (source branch из MR)
      * @param fileIndex мёрженный файловый индекс (имя → пути), построенный в buildContext()
-     * @return карта qualified name → байты jar (может быть пустой)
+     * @return карта qualified name → путь к jar (может быть пустой)
      */
-    public Map<String, byte[]> collectDependencySources(
+    public Map<String, Path> collectDependencySources(
             String gitlabUrl, String token, String projectId, String branch,
             Map<String, List<String>> fileIndex) {
 
@@ -110,14 +111,13 @@ public class DependencyContextService {
         }
         log.info("Total versioned dependencies to process: {}", allDeps.size());
 
-        // 5. Скачать sources.jar (кэшируется) и построить карту qualifiedName → jarBytes
-        Map<String, byte[]> dependencySources = new HashMap<>();
+        // 5. Для каждого dep получить путь к jar на диске и проиндексировать классы
+        Map<String, Path> dependencySources = new HashMap<>();
         for (DependencyCoordinate dep : allDeps) {
-            sourcesLoader.downloadSourcesJar(artifactoryUrls, dep).ifPresent(jarBytes -> {
-                Map<String, String> sources = classNameExtractor.extractSources(jarBytes, dep.toString());
-                // Сохраняем ссылку на jar для каждого класса из этого артефакта
-                sources.keySet().forEach(qName -> dependencySources.put(qName, jarBytes));
-                log.debug("Indexed {} classes from {}", sources.size(), dep);
+            sourcesLoader.resolveSourcesJar(artifactoryUrls, dep).ifPresent(jarPath -> {
+                Set<String> classNames = classNameExtractor.extractClassNames(jarPath, dep.toString());
+                classNames.forEach(qName -> dependencySources.put(qName, jarPath));
+                log.debug("Indexed {} classes from {}", classNames.size(), dep);
             });
         }
 
