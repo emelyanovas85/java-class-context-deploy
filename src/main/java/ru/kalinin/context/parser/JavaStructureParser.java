@@ -22,17 +22,18 @@ import java.util.function.BiFunction;
  * <h3>resolveType работает в четыре шага</h3>
  * <ol>
  *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
- *   <li><b>Nested type</b>: перед обработкой полей/методов каждого класса
- *       его прямые вложенные типы регистрируются в {@code importMap} как
- *       {@code SimpleName → OuterQName.SimpleName}. Это гарантирует, что
- *       {@code Имена_Диалоговых_Окон} резолвится в
- *       {@code forms.general.dialog.Диалоговое_окно_с_действием.Имена_Диалоговых_Окон},
- *       а не в {@code forms.general.dialog.Имена_Диалоговых_Окон}.</li>
+ *   <li><b>Sibling / nested type</b>: перед построением структур в {@code importMap}
+ *       регистрируются:
+ *       <ul>
+ *         <li>все top-level типы файла (sibling non-public классы, например
+ *             {@code Отчеты_депозитариев_Objects} в том же .java что и главный класс);</li>
+ *         <li>прямые nested типы каждого обрабатываемого класса
+ *             ({@code SimpleName → OuterQName.SimpleName}).</li>
+ *       </ul>
+ *       {@code putIfAbsent} — явный import всегда имеет приоритет.</li>
  *   <li><b>Wildcard resolver</b>: если есть {@code import pkg.*} —
  *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.
- *       Резолвер ищет класс в {@code fileIndex} и {@code dependencySources}
- *       и возвращает qualified name, если нашёл ровно одного кандидата.
- *       Если не нашёл — оставляет simple name (чтобы не прилеплять пакет файла).</li>
+ *       Если не нашёл — оставляет simple name.</li>
  *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
  *       добавляет префикс пакета файла.</li>
  *   <li>Возвращает как есть (встроенные, void, already-qualified).</li>
@@ -40,16 +41,13 @@ import java.util.function.BiFunction;
  *
  * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
  * {@link #parse} и не хранится в полях компонента.
- *
- * <p>Множество java.lang-типов строится динамически через
- * {@link JavaLangTypeRegistry#NAMES}.
  */
 @Slf4j
 @Component
 public class JavaStructureParser {
 
     /**
-     * Резолвер wildcard-импортов, не делающий ничего (для вызовов без индекса).
+     * Резолвер wildcard-импортов, не делающий ничего.
      * Сигнатура: (simpleName, wildcardPackages) → Optional&lt;qualifiedName&gt;
      */
     public static final BiFunction<String, List<String>, Optional<String>> NO_OP_RESOLVER =
@@ -92,6 +90,16 @@ public class JavaStructureParser {
         Map<String, String> importMap = buildImportMap(cu);
         List<String> wildcardPackages = buildWildcardPackages(cu);
 
+        // Регистрируем все top-level типы файла (sibling non-public классы).
+        // Это позволяет resolveType найти их на шаге 1 (импорт) вместо same-package fallback,
+        // чтобы qualified name формировался как packageName.SimpleName.
+        // putIfAbsent — явный import всегда имеет приоритет.
+        for (TypeDeclaration<?> td : cu.getTypes()) {
+            String tdSimple = td.getNameAsString();
+            String tdQualified = packageName.isEmpty() ? tdSimple : packageName + "." + tdSimple;
+            importMap.putIfAbsent(tdSimple, tdQualified);
+        }
+
         List<ClassStructure> structures = new ArrayList<>();
         for (TypeDeclaration<?> typeDecl : cu.getTypes()) {
             structures.add(buildClassStructure(
@@ -102,8 +110,7 @@ public class JavaStructureParser {
     }
 
     /**
-     * Удобный перегруз без резолвера — для мест, где индекс недоступен
-     * (например, парсинг из sources.jar зависимостей).
+     * Удобный перегруз без резолвера — для мест, где индекс недоступен.
      */
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel) {
         return parse(sourceCode, sourceFile, contextLevel, NO_OP_RESOLVER);
@@ -156,9 +163,9 @@ public class JavaStructureParser {
         String simpleName = typeDecl.getNameAsString();
         String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
 
-        // Регистрируем прямые вложенные типы в importMap:
+        // Регистрируем прямые nested типы в importMap:
         // SimpleName → OuterQName.SimpleName
-        // putIfAbsent — явный import имеет приоритет
+        // putIfAbsent — явный import / sibling имеют приоритет
         for (BodyDeclaration<?> member : typeDecl.getMembers()) {
             if (member instanceof TypeDeclaration<?> nestedType) {
                 String nestedSimple = nestedType.getNameAsString();
@@ -302,8 +309,6 @@ public class JavaStructureParser {
     // -------------------------------------------------------------------------
 
     private Map<String, String> buildImportMap(CompilationUnit cu) {
-        // Используем HashMap (не LinkedHashMap) чтобы putIfAbsent работал корректно
-        // при добавлении nested types в buildClassStructure
         Map<String, String> map = new HashMap<>();
         for (ImportDeclaration imp : cu.getImports()) {
             if (!imp.isAsterisk() && !imp.isStatic()) {
@@ -328,13 +333,7 @@ public class JavaStructureParser {
     }
 
     /**
-     * Резолвит тип в qualified name:
-     * <ol>
-     *   <li>Explicit import (включая зарегистрированные nested типы).</li>
-     *   <li>wildcardResolver(simpleName, wildcardPackages) — если есть wildcard-импорты.</li>
-     *   <li>Same-package fallback — только если wildcard-импортов нет вовсе.</li>
-     *   <li>Возвращаем как есть.</li>
-     * </ol>
+     * Резолвит тип в qualified name.
      */
     private String resolveType(Type type,
                                Map<String, String> importMap,
@@ -345,7 +344,7 @@ public class JavaStructureParser {
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
 
-        // 1. Explicit import (+ nested types зарегистрированы через putIfAbsent)
+        // 1. Explicit import (+ sibling и nested типы зарегистрированы через putIfAbsent)
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
         }
@@ -354,8 +353,6 @@ public class JavaStructureParser {
             // 2. Wildcard resolver
             if (!wildcardPackages.isEmpty()) {
                 Optional<String> resolved = wildcardResolver.apply(base, wildcardPackages);
-                // resolved.empty() — не нашли / амбигуация: оставляем simple name,
-                // чтобы не прилеплять пакет текущего файла.
                 return resolved.map(q -> q + suffix).orElse(base + suffix);
             }
 
