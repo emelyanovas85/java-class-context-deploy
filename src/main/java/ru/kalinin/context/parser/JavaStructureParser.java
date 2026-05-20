@@ -22,6 +22,12 @@ import java.util.function.BiFunction;
  * <h3>resolveType работает в четыре шага</h3>
  * <ol>
  *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
+ *   <li><b>Nested type</b>: перед обработкой полей/методов каждого класса
+ *       его прямые вложенные типы регистрируются в {@code importMap} как
+ *       {@code SimpleName → OuterQName.SimpleName}. Это гарантирует, что
+ *       {@code Имена_Диалоговых_Окон} резолвится в
+ *       {@code forms.general.dialog.Диалоговое_окно_с_действием.Имена_Диалоговых_Окон},
+ *       а не в {@code forms.general.dialog.Имена_Диалоговых_Окон}.</li>
  *   <li><b>Wildcard resolver</b>: если есть {@code import pkg.*} —
  *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.
  *       Резолвер ищет класс в {@code fileIndex} и {@code dependencySources}
@@ -149,6 +155,16 @@ public class JavaStructureParser {
                                                int contextLevel) {
         String simpleName = typeDecl.getNameAsString();
         String qualifiedName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+
+        // Регистрируем прямые вложенные типы в importMap:
+        // SimpleName → OuterQName.SimpleName
+        // putIfAbsent — явный import имеет приоритет
+        for (BodyDeclaration<?> member : typeDecl.getMembers()) {
+            if (member instanceof TypeDeclaration<?> nestedType) {
+                String nestedSimple = nestedType.getNameAsString();
+                importMap.putIfAbsent(nestedSimple, qualifiedName + "." + nestedSimple);
+            }
+        }
 
         List<AnnotationInfo> annotations = extractAnnotations(typeDecl.getAnnotations());
         List<String> modifiers = extractModifiers(typeDecl.getModifiers());
@@ -286,7 +302,9 @@ public class JavaStructureParser {
     // -------------------------------------------------------------------------
 
     private Map<String, String> buildImportMap(CompilationUnit cu) {
-        Map<String, String> map = new LinkedHashMap<>();
+        // Используем HashMap (не LinkedHashMap) чтобы putIfAbsent работал корректно
+        // при добавлении nested types в buildClassStructure
+        Map<String, String> map = new HashMap<>();
         for (ImportDeclaration imp : cu.getImports()) {
             if (!imp.isAsterisk() && !imp.isStatic()) {
                 String qualified = imp.getNameAsString();
@@ -312,7 +330,7 @@ public class JavaStructureParser {
     /**
      * Резолвит тип в qualified name:
      * <ol>
-     *   <li>Explicit import.</li>
+     *   <li>Explicit import (включая зарегистрированные nested типы).</li>
      *   <li>wildcardResolver(simpleName, wildcardPackages) — если есть wildcard-импорты.</li>
      *   <li>Same-package fallback — только если wildcard-импортов нет вовсе.</li>
      *   <li>Возвращаем как есть.</li>
@@ -327,7 +345,7 @@ public class JavaStructureParser {
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
 
-        // 1. Explicit import
+        // 1. Explicit import (+ nested types зарегистрированы через putIfAbsent)
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
         }
