@@ -13,6 +13,7 @@ import ru.kalinin.context.parser.UnresolvedTypeRef;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.BiFunction;
+import java.util.stream.Collectors;
 
 /**
  * Основной сервис: строит многоуровневый контекст для мёрж-реквеста.
@@ -123,6 +124,8 @@ public class ContextBuilderService {
 
         // ── Уровни 1..depth: зависимости ───────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
+        List<ClassStructure> allParsed = new ArrayList<>(level0);
+
         for (int depth = 1; depth <= request.depth(); depth++) {
             Set<String> referencedTypes = collectAndResolveRefs(currentLevel, processedQNames);
             referencedTypes.removeAll(processedQNames);
@@ -157,7 +160,23 @@ public class ContextBuilderService {
                 log.debug("Type '{}' not found in repo or dependency sources — skipping", qName);
             }
 
+            allParsed.addAll(nextLevel);
             currentLevel = nextLevel;
+        }
+
+        // ── Итоговый отчёт: нерезолвленные типы ───────────────────────────────────
+        if (log.isInfoEnabled()) {
+            Set<String> finalRefs = collectAndResolveRefs(allParsed, processedQNames);
+            Set<String> unresolved = finalRefs.stream()
+                    .filter(name -> !name.contains(".") || !processedQNames.contains(name))
+                    .collect(Collectors.toCollection(TreeSet::new));
+            if (unresolved.isEmpty()) {
+                log.info("All referenced types resolved successfully");
+            } else {
+                log.info("Unresolved types ({}):\n  {}",
+                        unresolved.size(),
+                        String.join("\n  ", unresolved));
+            }
         }
 
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
@@ -260,13 +279,8 @@ public class ContextBuilderService {
     // -------------------------------------------------------------------------
 
     /**
-     * Собирает все типы-зависимости со всех классов текущего уровня и пробует
+     * Собирает все типы-зависимости со всех классов и пробует
      * резолвить нерезолвленные (simple name) через уже известные {@code processedQNames}.
-     *
-     * <p>Логика пост-резолвинга для {@link UnresolvedTypeRef#isUnresolved()} == true:
-     * перебираем {@code processedQNames}; если {@code qName} заканчивается на
-     * {@code "." + simpleName} и пакет {@code qName} входит в
-     * {@link UnresolvedTypeRef#wildcardPackages()} — это однозначное совпадение.
      */
     private Set<String> collectAndResolveRefs(List<ClassStructure> classes,
                                                Set<String> processedQNames) {
