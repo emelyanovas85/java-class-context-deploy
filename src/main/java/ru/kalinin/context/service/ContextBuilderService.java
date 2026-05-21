@@ -30,19 +30,18 @@ import java.util.stream.Collectors;
  *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
- *   <li>Финальный пост-проход: все qualified имена из собранных refs добавляются
- *       в {@code processedQNames}, затем повторно запускается поиск нерезолвленных
- *       зависимостей в repo / dependencySources.</li>
+ *   <li>Финальный пост-проход: строится {@code enrichedQNames} = processedQNames +
+ *       все qualified refs из allParsed. Через него резолвятся simple names
+ *       (например {@code Description} → {@code io.qameta.allure.Description}).
+ *       Типы, не попавшие в processedQNames, ищутся в repo / dependencySources.</li>
  * </ol>
  *
  * <h3>Пост-резолвинг wildcard-типов</h3>
  * <p>Если при парсинге тип не удалось резолвить через wildcardResolver (например,
  * зависимость не была в dependencySources), имя сохраняется как simple name.
- * Финальный проход добавляет все qualified имена в {@code processedQNames}, после
- * чего {@link #resolveRef} может подтянуть через wildcardPackages:
- * если {@code Description} имеет wildcard {@code io.qameta.allure} и
- * {@code io.qameta.allure.Description} есть в {@code processedQNames} —
- * simple name считается резолвленным.
+ * Финальный проход использует {@code enrichedQNames} только для {@link #resolveRef} —
+ * основной {@code processedQNames} не изменяется, поэтому классы из jar/repo,
+ * которые ещё не были загружены, не блокируются как «уже обработанные».
  */
 @Slf4j
 @Service
@@ -169,15 +168,16 @@ public class ContextBuilderService {
         }
 
         // ── Финальный пост-проход ───────────────────────────────────────────────────
-        // Шаг 1: все qualified refs из всех парсенных классов — добавляем в processedQNames,
-        // чтобы resolveRef мог подтянуть simple names через wildcardPackages
+        // enrichedQNames = processedQNames + все qualified refs из allParsed.
+        // Используется ТОЛЬКО для resolveRef — основной processedQNames не трогаем,
+        // чтобы не заблокировать поиск классов из jar/repo, ещё не загруженных.
+        Set<String> enrichedQNames = new LinkedHashSet<>(processedQNames);
         collectRawRefs(allParsed).stream()
                 .filter(ref -> !ref.isUnresolved())
                 .map(UnresolvedTypeRef::name)
-                .forEach(processedQNames::add);
+                .forEach(enrichedQNames::add);
 
-        // Шаг 2: повторно собираем refs уже с пополненным processedQNames и ищем ненайденные
-        Set<String> unresolvedBeforeFinalPass = collectAndResolveRefs(allParsed, processedQNames)
+        Set<String> unresolvedBeforeFinalPass = collectAndResolveRefs(allParsed, enrichedQNames)
                 .stream()
                 .filter(name -> !processedQNames.contains(name))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
@@ -211,11 +211,18 @@ public class ContextBuilderService {
 
         // ── Итоговый отчёт: нерезолвленные типы ───────────────────────────────────
         // Нерезолвленным считается ref, для которого resolveRef вернул то же simple name
-        // (не подтянулся через wildcards) И оно не в processedQNames
+        // (не подтянулся через wildcards enrichedQNames) И оно не в processedQNames
         if (log.isInfoEnabled()) {
+            // Обновляем enrichedQNames после финального прохода
+            collectRawRefs(allParsed).stream()
+                    .filter(ref -> !ref.isUnresolved())
+                    .map(UnresolvedTypeRef::name)
+                    .forEach(enrichedQNames::add);
+            enrichedQNames.addAll(processedQNames);
+
             Set<String> unresolved = collectRawRefs(allParsed).stream()
-                    .map(ref -> resolveRef(ref, processedQNames))
-                    .filter(name -> !processedQNames.contains(name) && !name.contains("."))
+                    .map(ref -> resolveRef(ref, enrichedQNames))
+                    .filter(name -> !enrichedQNames.contains(name) && !name.contains("."))
                     .collect(Collectors.toCollection(TreeSet::new));
             if (unresolved.isEmpty()) {
                 log.info("All referenced types resolved successfully");
