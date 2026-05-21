@@ -30,6 +30,8 @@ import java.util.stream.Collectors;
  *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
+ *   <li>Финальный пост-проход: повторная попытка добрать ранее пропущенные зависимости
+ *       после того, как уже собраны все {@code processedQNames}.</li>
  * </ol>
  *
  * <h3>Пост-резолвинг wildcard-типов</h3>
@@ -164,11 +166,43 @@ public class ContextBuilderService {
             currentLevel = nextLevel;
         }
 
+        // ── Финальный пост-проход: добираем ранее пропущенные зависимости ──────────
+        Set<String> finalRefs = collectAndResolveRefs(allParsed, processedQNames);
+        Set<String> unresolvedBeforeFinalPass = finalRefs.stream()
+                .filter(name -> !processedQNames.contains(name))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        if (!unresolvedBeforeFinalPass.isEmpty()) {
+            log.info("Final pass: resolving {} previously unresolved types", unresolvedBeforeFinalPass.size());
+            List<ClassStructure> finalPassLevel = new ArrayList<>();
+
+            for (String qName : unresolvedBeforeFinalPass) {
+                Optional<Map.Entry<String, String>> repoSource =
+                        findRepoSourceForType(qName, fileIndex,
+                                request.gitlabUrl(), request.token(),
+                                request.projectId(), sourceBranch, processedQNames);
+
+                if (repoSource.isPresent()) {
+                    addFromRepoSource(repoSource.get(), request.depth(), wildcardResolver,
+                            finalPassLevel, processedQNames, allContexts);
+                    continue;
+                }
+
+                Path jarPath = dependencySources.get(qName);
+                if (jarPath != null) {
+                    addFromJar(jarPath, qName, request.depth(), wildcardResolver,
+                            finalPassLevel, processedQNames, allContexts);
+                    continue;
+                }
+            }
+
+            allParsed.addAll(finalPassLevel);
+        }
+
         // ── Итоговый отчёт: нерезолвленные типы ───────────────────────────────────
         if (log.isInfoEnabled()) {
-            Set<String> finalRefs = collectAndResolveRefs(allParsed, processedQNames);
-            Set<String> unresolved = finalRefs.stream()
-                    .filter(name -> !name.contains(".") || !processedQNames.contains(name))
+            Set<String> unresolved = collectAndResolveRefs(allParsed, processedQNames).stream()
+                    .filter(name -> !processedQNames.contains(name))
                     .collect(Collectors.toCollection(TreeSet::new));
             if (unresolved.isEmpty()) {
                 log.info("All referenced types resolved successfully");
