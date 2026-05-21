@@ -30,17 +30,19 @@ import java.util.stream.Collectors;
  *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
- *   <li>Финальный пост-проход: повторная попытка добрать ранее пропущенные зависимости
- *       после того, как уже собраны все {@code processedQNames}.</li>
+ *   <li>Финальный пост-проход: все qualified имена из собранных refs добавляются
+ *       в {@code processedQNames}, затем повторно запускается поиск нерезолвленных
+ *       зависимостей в repo / dependencySources.</li>
  * </ol>
  *
  * <h3>Пост-резолвинг wildcard-типов</h3>
  * <p>Если при парсинге тип не удалось резолвить через wildcardResolver (например,
  * зависимость не была в dependencySources), имя сохраняется как simple name.
- * После каждого уровня {@link #resolveRef} пробует найти соответствие среди уже
- * известных {@code processedQNames}, используя {@link UnresolvedTypeRef#wildcardPackages()}
- * для проверки релевантности: совпадение засчитывается только если пакет qualified-имени
- * входит в wildcard-пакеты того файла, откуда пришёл нерезолвленный тип.
+ * Финальный проход добавляет все qualified имена в {@code processedQNames}, после
+ * чего {@link #resolveRef} может подтянуть через wildcardPackages:
+ * если {@code Description} имеет wildcard {@code io.qameta.allure} и
+ * {@code io.qameta.allure.Description} есть в {@code processedQNames} —
+ * simple name считается резолвленным.
  */
 @Slf4j
 @Service
@@ -166,9 +168,17 @@ public class ContextBuilderService {
             currentLevel = nextLevel;
         }
 
-        // ── Финальный пост-проход: добираем ранее пропущенные зависимости ──────────
-        Set<String> finalRefs = collectAndResolveRefs(allParsed, processedQNames);
-        Set<String> unresolvedBeforeFinalPass = finalRefs.stream()
+        // ── Финальный пост-проход ───────────────────────────────────────────────────
+        // Шаг 1: все qualified refs из всех парсенных классов — добавляем в processedQNames,
+        // чтобы resolveRef мог подтянуть simple names через wildcardPackages
+        collectRawRefs(allParsed).stream()
+                .filter(ref -> !ref.isUnresolved())
+                .map(UnresolvedTypeRef::name)
+                .forEach(processedQNames::add);
+
+        // Шаг 2: повторно собираем refs уже с пополненным processedQNames и ищем ненайденные
+        Set<String> unresolvedBeforeFinalPass = collectAndResolveRefs(allParsed, processedQNames)
+                .stream()
                 .filter(name -> !processedQNames.contains(name))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
@@ -200,9 +210,12 @@ public class ContextBuilderService {
         }
 
         // ── Итоговый отчёт: нерезолвленные типы ───────────────────────────────────
+        // Нерезолвленным считается ref, для которого resolveRef вернул то же simple name
+        // (не подтянулся через wildcards) И оно не в processedQNames
         if (log.isInfoEnabled()) {
-            Set<String> unresolved = collectAndResolveRefs(allParsed, processedQNames).stream()
-                    .filter(name -> !processedQNames.contains(name))
+            Set<String> unresolved = collectRawRefs(allParsed).stream()
+                    .map(ref -> resolveRef(ref, processedQNames))
+                    .filter(name -> !processedQNames.contains(name) && !name.contains("."))
                     .collect(Collectors.toCollection(TreeSet::new));
             if (unresolved.isEmpty()) {
                 log.info("All referenced types resolved successfully");
@@ -309,8 +322,19 @@ public class ContextBuilderService {
     }
 
     // -------------------------------------------------------------------------
-    // collectAndResolveRefs — сбор + пост-резолвинг
+    // collectRawRefs / collectAndResolveRefs
     // -------------------------------------------------------------------------
+
+    /**
+     * Собирает сырые {@link UnresolvedTypeRef} без резолвинга для заданных классов.
+     */
+    private Set<UnresolvedTypeRef> collectRawRefs(List<ClassStructure> classes) {
+        Set<UnresolvedTypeRef> refs = new LinkedHashSet<>();
+        for (ClassStructure cs : classes) {
+            refs.addAll(structureParser.collectReferencedTypes(cs));
+        }
+        return refs;
+    }
 
     /**
      * Собирает все типы-зависимости со всех классов и пробует
@@ -319,10 +343,8 @@ public class ContextBuilderService {
     private Set<String> collectAndResolveRefs(List<ClassStructure> classes,
                                                Set<String> processedQNames) {
         Set<String> resolved = new LinkedHashSet<>();
-        for (ClassStructure cs : classes) {
-            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
-                resolved.add(resolveRef(ref, processedQNames));
-            }
+        for (UnresolvedTypeRef ref : collectRawRefs(classes)) {
+            resolved.add(resolveRef(ref, processedQNames));
         }
         return resolved;
     }
