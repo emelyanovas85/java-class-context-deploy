@@ -28,17 +28,14 @@ import java.util.function.BiFunction;
  *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.</li>
  *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
  *       добавляет префикс пакета файла (только для simple name).</li>
- *   <li><b>Частично-квалифицированный тип, Outer в importMap</b> ({@code Outer.Inner}):
- *       если левая часть ({@code Outer}) есть в {@code importMap} — подставляем префикс.
- *       Например: {@code Сообщение.Имена_Окон} →
- *       {@code forms.general.dialog.Сообщение.Имена_Окон}.</li>
- *   <li><b>Частично-квалифицированный тип, Outer в том же пакете</b>:
- *       если левая часть начинается с заглавной и пакет известен —
- *       применяем same-package fallback к целому выражению.
- *       Например: {@code Ввод_Новой_записи.Вкладка} (Outer - другой файл того же пакета) →
- *       {@code forms.credit.X.Ввод_Новой_записи.Вкладка}.</li>
- *   <li>Возвращает как есть (already fully-qualified).</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в importMap</b>: подставляем префикс.</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в том же пакете</b>: same-package fallback.</li>
+ *   <li>Возвращает как есть.</li>
  * </ol>
+ *
+ * <p>Имена аннотаций также резолвятся через importMap в момент парсинга,
+ * поэтому {@code AnnotationInfo.name()} всегда содержит qualified name
+ * (если резолюция удалась) или simple name (если нет).
  *
  * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
  * {@link #parse} и не хранится в полях компонента.
@@ -78,8 +75,6 @@ public class JavaStructureParser {
         Map<String, String> importMap = buildImportMap(cu);
         List<String> wildcardPackages = buildWildcardPackages(cu);
 
-        // Регистрируем все top-level типы файла (sibling non-public классы).
-        // putIfAbsent — явный import всегда имеет приоритет.
         for (TypeDeclaration<?> td : cu.getTypes()) {
             String tdSimple = td.getNameAsString();
             String tdQualified = packageName.isEmpty() ? tdSimple : packageName + "." + tdSimple;
@@ -150,7 +145,8 @@ public class JavaStructureParser {
             }
         }
 
-        List<AnnotationInfo> annotations = extractAnnotations(typeDecl.getAnnotations());
+        List<AnnotationInfo> annotations = extractAnnotations(
+                typeDecl.getAnnotations(), importMap, wildcardPackages, wildcardResolver, filePackage);
         List<String> modifiers = extractModifiers(typeDecl.getModifiers());
         String kind = detectKind(typeDecl);
 
@@ -193,7 +189,7 @@ public class JavaStructureParser {
         if (typeDecl instanceof RecordDeclaration rd) {
             List<FieldInfo> recordComponents = rd.getParameters().stream()
                     .map(p -> new FieldInfo(
-                            extractAnnotations(p.getAnnotations()),
+                            extractAnnotations(p.getAnnotations(), importMap, wildcardPackages, wildcardResolver, filePackage),
                             List.of(),
                             resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, filePackage),
                             p.getNameAsString(),
@@ -227,7 +223,8 @@ public class JavaStructureParser {
                                           List<String> wildcardPackages,
                                           BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                           String pkg) {
-        List<AnnotationInfo> annotations = extractAnnotations(fd.getAnnotations());
+        List<AnnotationInfo> annotations = extractAnnotations(
+                fd.getAnnotations(), importMap, wildcardPackages, wildcardResolver, pkg);
         List<String> modifiers = extractModifiers(fd.getModifiers());
         String type = resolveType(fd.getElementType(), importMap, wildcardPackages, wildcardResolver, pkg);
         return fd.getVariables().stream()
@@ -243,14 +240,14 @@ public class JavaStructureParser {
                                      BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                      String pkg) {
         return new MethodInfo(
-                extractAnnotations(md.getAnnotations()),
+                extractAnnotations(md.getAnnotations(), importMap, wildcardPackages, wildcardResolver, pkg),
                 extractModifiers(md.getModifiers()),
                 resolveType(md.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                 md.getNameAsString(),
                 md.getTypeParameters().stream().map(Object::toString).toList(),
                 md.getParameters().stream()
                         .map(p -> new ParameterInfo(
-                                extractAnnotations(p.getAnnotations()),
+                                extractAnnotations(p.getAnnotations(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 p.getNameAsString(), p.isVarArgs()))
                         .toList(),
@@ -265,14 +262,14 @@ public class JavaStructureParser {
                                           BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                           String pkg) {
         return new MethodInfo(
-                extractAnnotations(cd.getAnnotations()),
+                extractAnnotations(cd.getAnnotations(), importMap, wildcardPackages, wildcardResolver, pkg),
                 extractModifiers(cd.getModifiers()),
                 null,
                 cd.getNameAsString(),
                 cd.getTypeParameters().stream().map(Object::toString).toList(),
                 cd.getParameters().stream()
                         .map(p -> new ParameterInfo(
-                                extractAnnotations(p.getAnnotations()),
+                                extractAnnotations(p.getAnnotations(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 resolveType(p.getType(), importMap, wildcardPackages, wildcardResolver, pkg),
                                 p.getNameAsString(), p.isVarArgs()))
                         .toList(),
@@ -311,17 +308,6 @@ public class JavaStructureParser {
 
     /**
      * Резолвит тип в qualified name.
-     *
-     * <p>Порядок шагов:
-     * <ol>
-     *   <li>Explicit import (+ sibling/nested через putIfAbsent).</li>
-     *   <li>Wildcard resolver — если есть wildcard-импорты и base без точки.</li>
-     *   <li>Same-package fallback — если wildcard-импортов нет вовсе и base без точки.</li>
-     *   <li>Outer.Inner, Outer есть в importMap — подставляем qualified префикс Outer.</li>
-     *   <li>Outer.Inner, Outer начинается с заглавной и пакет известен —
-     *       same-package fallback к всему выражению.</li>
-     *   <li>Возвращаем как есть.</li>
-     * </ol>
      */
     private String resolveType(Type type,
                                Map<String, String> importMap,
@@ -331,7 +317,40 @@ public class JavaStructureParser {
         String raw = type.asString();
         String base = raw.contains("<") ? raw.substring(0, raw.indexOf('<')).trim() : raw;
         String suffix = raw.contains("<") ? raw.substring(raw.indexOf('<')) : "";
+        return resolveByName(base, suffix, importMap, wildcardPackages, wildcardResolver, filePackage);
+    }
 
+    /**
+     * Резолвит имя аннотации в qualified name.
+     * Аннотация не может иметь generic-суффикс, поэтому suffix = "".
+     */
+    private String resolveAnnotationName(String simpleName,
+                                         Map<String, String> importMap,
+                                         List<String> wildcardPackages,
+                                         BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                         String filePackage) {
+        return resolveByName(simpleName, "", importMap, wildcardPackages, wildcardResolver, filePackage);
+    }
+
+    /**
+     * Общая логика резолюции имени через importMap.
+     *
+     * <p>Порядок шагов:
+     * <ol>
+     *   <li>Explicit import / sibling / nested — через importMap.</li>
+     *   <li>Wildcard resolver — если есть wildcard-импорты и base без точки.</li>
+     *   <li>Same-package fallback — если wildcard-импортов нет вовсе и base без точки.</li>
+     *   <li>Outer.Inner — Outer есть в importMap.</li>
+     *   <li>Outer.Inner — Outer начинается с заглавной и пакет известен.</li>
+     *   <li>Возвращаем как есть.</li>
+     * </ol>
+     */
+    private String resolveByName(String base,
+                                  String suffix,
+                                  Map<String, String> importMap,
+                                  List<String> wildcardPackages,
+                                  BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                  String filePackage) {
         // 1. Explicit import (+ sibling/nested зарегистрированы через putIfAbsent)
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
@@ -352,17 +371,14 @@ public class JavaStructureParser {
         if (base.contains(".")) {
             int dot = base.indexOf('.');
             String outerSimple = base.substring(0, dot);
-            String rest = base.substring(dot); // ".Inner" или ".Inner.Deep"
+            String rest = base.substring(dot);
 
-            // 4. Outer есть в importMap (явный import или sibling-тип того же файла)
+            // 4. Outer есть в importMap
             if (importMap.containsKey(outerSimple)) {
                 return importMap.get(outerSimple) + rest + suffix;
             }
 
-            // 5. Outer не в importMap, но начинается с заглавной и пакет известен
-            //    → это Outer из того же пакета (other file, no explicit import)
-            //    Пример: Ввод_Новой_записи.Вкладка → forms.credit.X.Ввод_Новой_записи.Вкладка
-            //    Защита: outerSimple должна начинаться с заглавной (имя класса, не пакет)
+            // 5. Outer начинается с заглавной — same-package fallback
             if (!filePackage.isEmpty()
                     && !outerSimple.isEmpty()
                     && Character.isUpperCase(outerSimple.charAt(0))) {
@@ -371,16 +387,27 @@ public class JavaStructureParser {
         }
 
         // 6. Возвращаем как есть
-        return raw;
+        return base + suffix;
     }
 
     // -------------------------------------------------------------------------
     // Private: helpers
     // -------------------------------------------------------------------------
 
-    private List<AnnotationInfo> extractAnnotations(NodeList<AnnotationExpr> annotations) {
+    /**
+     * Извлекает аннотации, резолвируя имя аннотации через importMap.
+     * Таким образом {@code AnnotationInfo.name()} всегда содержит qualified name
+     * (если резолюция удалась) или simple name (если импорт не найден).
+     */
+    private List<AnnotationInfo> extractAnnotations(NodeList<AnnotationExpr> annotations,
+                                                    Map<String, String> importMap,
+                                                    List<String> wildcardPackages,
+                                                    BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+                                                    String filePackage) {
         return annotations.stream()
-                .map(a -> new AnnotationInfo(a.getNameAsString(), extractAnnotationAttributes(a)))
+                .map(a -> new AnnotationInfo(
+                        resolveAnnotationName(a.getNameAsString(), importMap, wildcardPackages, wildcardResolver, filePackage),
+                        extractAnnotationAttributes(a)))
                 .toList();
     }
 
