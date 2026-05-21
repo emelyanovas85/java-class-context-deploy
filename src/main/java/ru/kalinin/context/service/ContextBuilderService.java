@@ -8,6 +8,7 @@ import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
 import ru.kalinin.context.parser.StructureNodeMapper;
+import ru.kalinin.context.parser.UnresolvedTypeRef;
 
 import java.nio.file.Path;
 import java.util.*;
@@ -29,6 +30,14 @@ import java.util.function.BiFunction;
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
  * </ol>
+ *
+ * <h3>Пост-резолвинг wildcard-типов</h3>
+ * <p>Если при парсинге тип не удалось резолвить через wildcardResolver (например,
+ * зависимость не была в dependencySources), имя сохраняется как simple name.
+ * После каждого уровня {@link #resolveRef} пробует найти соответствие среди уже
+ * известных {@code processedQNames}, используя {@link UnresolvedTypeRef#wildcardPackages()}
+ * для проверки релевантности: совпадение засчитывается только если пакет qualified-имени
+ * входит в wildcard-пакеты того файла, откуда пришёл нерезолвленный тип.
  */
 @Slf4j
 @Service
@@ -115,7 +124,7 @@ public class ContextBuilderService {
         // ── Уровни 1..depth: зависимости ───────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         for (int depth = 1; depth <= request.depth(); depth++) {
-            Set<String> referencedTypes = collectAllReferencedTypes(currentLevel);
+            Set<String> referencedTypes = collectAndResolveRefs(currentLevel, processedQNames);
             referencedTypes.removeAll(processedQNames);
             if (referencedTypes.isEmpty()) break;
 
@@ -158,24 +167,16 @@ public class ContextBuilderService {
     // Repo source lookup
     // -------------------------------------------------------------------------
 
-    /**
-     * Ищет файл источника для {@code qName} в репозитории: сначала точный поиск,
-     * затем последовательное откусывание правых сегментов для Outer.Inner-типов.
-     * При нахождении outer-класса исходный {@code qName} помечается
-     * как обработанный в {@code processedQNames}.
-     */
     private Optional<Map.Entry<String, String>> findRepoSourceForType(
             String qName,
             Map<String, List<String>> fileIndex,
             String gitlabUrl, String token, String projectId, String branch,
             Set<String> processedQNames) {
 
-        // Точный поиск
         Optional<Map.Entry<String, String>> exact =
                 readRepoFile(qName, fileIndex, gitlabUrl, token, projectId, branch);
         if (exact.isPresent()) return exact;
 
-        // Последовательное откусывание правого сегмента
         String candidate = qName;
         while (candidate.contains(".")) {
             candidate = candidate.substring(0, candidate.lastIndexOf('.'));
@@ -190,9 +191,6 @@ public class ContextBuilderService {
         return Optional.empty();
     }
 
-    /**
-     * Находит файл в fileIndex по qualified name и читает его содержимое.
-     */
     private Optional<Map.Entry<String, String>> readRepoFile(
             String qName,
             Map<String, List<String>> fileIndex,
@@ -258,6 +256,65 @@ public class ContextBuilderService {
     }
 
     // -------------------------------------------------------------------------
+    // collectAndResolveRefs — сбор + пост-резолвинг
+    // -------------------------------------------------------------------------
+
+    /**
+     * Собирает все типы-зависимости со всех классов текущего уровня и пробует
+     * резолвить нерезолвленные (simple name) через уже известные {@code processedQNames}.
+     *
+     * <p>Логика пост-резолвинга для {@link UnresolvedTypeRef#isUnresolved()} == true:
+     * перебираем {@code processedQNames}; если {@code qName} заканчивается на
+     * {@code "." + simpleName} и пакет {@code qName} входит в
+     * {@link UnresolvedTypeRef#wildcardPackages()} — это однозначное совпадение.
+     */
+    private Set<String> collectAndResolveRefs(List<ClassStructure> classes,
+                                               Set<String> processedQNames) {
+        Set<String> resolved = new LinkedHashSet<>();
+        for (ClassStructure cs : classes) {
+            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
+                resolved.add(resolveRef(ref, processedQNames));
+            }
+        }
+        return resolved;
+    }
+
+    /**
+     * Пробует резолвить {@link UnresolvedTypeRef} через {@code processedQNames}.
+     * Если имя уже qualified (содержит точку) — возвращает как есть.
+     * Если simple name — ищет в processedQNames по правилу:
+     * {@code qName.endsWith("." + simpleName) && wildcardPackages.contains(pkg(qName))}.
+     */
+    private String resolveRef(UnresolvedTypeRef ref, Set<String> processedQNames) {
+        if (!ref.isUnresolved()) return ref.name();
+
+        String simpleName = ref.name();
+        List<String> wildcards = ref.wildcardPackages();
+        if (wildcards.isEmpty()) return simpleName;
+
+        String suffix = "." + simpleName;
+        List<String> candidates = new ArrayList<>();
+        for (String qName : processedQNames) {
+            if (qName.endsWith(suffix)) {
+                String pkg = qName.substring(0, qName.length() - suffix.length());
+                if (wildcards.contains(pkg)) {
+                    candidates.add(qName);
+                }
+            }
+        }
+
+        if (candidates.size() == 1) {
+            log.debug("Post-resolved '{}' → '{}' via wildcardImports={}",
+                    simpleName, candidates.get(0), wildcards);
+            return candidates.get(0);
+        }
+        if (candidates.size() > 1) {
+            log.warn("Ambiguous post-resolution for '{}': candidates={}", simpleName, candidates);
+        }
+        return simpleName;
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers: adding resolved sources to context
     // -------------------------------------------------------------------------
 
@@ -312,11 +369,5 @@ public class ContextBuilderService {
             processed.add(nc.qualifiedName());
             addNestedQNames(nc, processed);
         });
-    }
-
-    private Set<String> collectAllReferencedTypes(List<ClassStructure> classes) {
-        Set<String> types = new LinkedHashSet<>();
-        classes.forEach(cs -> types.addAll(structureParser.collectReferencedTypes(cs)));
-        return types;
     }
 }

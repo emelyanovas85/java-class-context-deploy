@@ -28,14 +28,20 @@ import java.util.function.BiFunction;
  *       вызывается {@code wildcardResolver(simpleName, wildcardPackages)}.</li>
  *   <li><b>Same-package fallback</b>: если wildcard-импортов нет вовсе —
  *       добавляет префикс пакета файла (только для simple name).</li>
- *   <li><b>Частично-квалифицированный тип, Outer в importMap</b>: подставляем префикс.</li>
- *   <li><b>Частично-квалифицированный тип, Outer в том же пакете</b>: same-package fallback.</li>
- *   <li>Возвращает как есть.</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в importMap</b> ({@code Outer.Inner}):
+ *       если левая часть ({@code Outer}) есть в {@code importMap} — подставляем префикс.</li>
+ *   <li><b>Частично-квалифицированный тип, Outer в том же пакете</b>:
+ *       если левая часть начинается с заглавной и пакет известен —
+ *       применяем same-package fallback к целому выражению.</li>
+ *   <li>Возвращает как есть (already fully-qualified).</li>
  * </ol>
  *
  * <p>Имена аннотаций также резолвятся через importMap в момент парсинга,
- * поэтому {@code AnnotationInfo.name()} всегда содержит qualified name
- * (если резолюция удалась) или simple name (если нет).
+ * поэтому {@code AnnotationInfo.name()} содержит qualified name (если резолвинг удался)
+ * или simple name (если нет — например, при wildcard-импорте без wildcardResolver).
+ *
+ * <p>Wildcard-пакеты сохраняются в {@link ClassStructure#wildcardImports()} для
+ * пост-резолвинга нерезолвленных имён в {@link ru.kalinin.context.service.ContextBuilderService}.
  *
  * <p>Парсер stateless — wildcardResolver передаётся снаружи при каждом вызове
  * {@link #parse} и не хранится в полях компонента.
@@ -94,33 +100,50 @@ public class JavaStructureParser {
         return parse(sourceCode, sourceFile, contextLevel, NO_OP_RESOLVER);
     }
 
-    public Set<String> collectReferencedTypes(ClassStructure cs) {
-        Set<String> types = new LinkedHashSet<>();
+    /**
+     * Собирает все типы, на которые ссылается {@link ClassStructure},
+     * оборачивая каждый в {@link UnresolvedTypeRef} с wildcardImports из структуры.
+     *
+     * <p>Уже fully-qualified имена (содержат точку) тоже попадают в результат —
+     * они помечены как resolved ({@link UnresolvedTypeRef#isUnresolved()} == false)
+     * и обрабатываются как обычные зависимости без пост-резолвинга.
+     */
+    public Set<UnresolvedTypeRef> collectReferencedTypes(ClassStructure cs) {
+        Set<String> rawNames = new LinkedHashSet<>();
+        List<String> wildcards = cs.wildcardImports();
 
-        cs.annotations().forEach(a -> types.add(a.name()));
-        if (cs.extendedType() != null) types.add(stripGenerics(cs.extendedType()));
-        cs.implementedTypes().forEach(t -> types.add(stripGenerics(t)));
+        cs.annotations().forEach(a -> rawNames.add(a.name()));
+        if (cs.extendedType() != null) rawNames.add(stripGenerics(cs.extendedType()));
+        cs.implementedTypes().forEach(t -> rawNames.add(stripGenerics(t)));
 
         cs.fields().forEach(f -> {
-            types.add(stripGenerics(f.type()));
-            f.annotations().forEach(a -> types.add(a.name()));
+            rawNames.add(stripGenerics(f.type()));
+            f.annotations().forEach(a -> rawNames.add(a.name()));
         });
 
         cs.methods().forEach(m -> {
-            if (m.returnType() != null) types.add(stripGenerics(m.returnType()));
+            if (m.returnType() != null) rawNames.add(stripGenerics(m.returnType()));
             m.parameters().forEach(p -> {
-                types.add(stripGenerics(p.type()));
-                p.annotations().forEach(a -> types.add(a.name()));
+                rawNames.add(stripGenerics(p.type()));
+                p.annotations().forEach(a -> rawNames.add(a.name()));
             });
-            m.thrownExceptions().forEach(e -> types.add(stripGenerics(e)));
-            m.typeParameters().forEach(tp -> extractTypeParamBounds(tp, types));
-            m.annotations().forEach(a -> types.add(a.name()));
+            m.thrownExceptions().forEach(e -> rawNames.add(stripGenerics(e)));
+            m.typeParameters().forEach(tp -> extractTypeParamBounds(tp, rawNames));
+            m.annotations().forEach(a -> rawNames.add(a.name()));
         });
 
-        cs.nestedClasses().forEach(nc -> types.addAll(collectReferencedTypes(nc)));
+        // Рекурсивно для вложенных классов — они наследуют wildcardImports родителя,
+        // т.к. находятся в том же файле
+        cs.nestedClasses().forEach(nc -> {
+            collectReferencedTypes(nc).forEach(ref ->
+                    rawNames.add(ref.name()));
+        });
 
-        types.removeIf(this::isBuiltinOrJavaLangType);
-        return types;
+        rawNames.removeIf(this::isBuiltinOrJavaLangType);
+
+        Set<UnresolvedTypeRef> refs = new LinkedHashSet<>();
+        rawNames.forEach(name -> refs.add(new UnresolvedTypeRef(name, wildcards)));
+        return refs;
     }
 
     // -------------------------------------------------------------------------
@@ -211,7 +234,8 @@ public class JavaStructureParser {
         return new ClassStructure(
                 annotations, modifiers, kind, simpleName, qualifiedName,
                 typeParameters, extendedType, implementedTypes,
-                fields, methods, nested, sourceFile, contextLevel);
+                fields, methods, nested, sourceFile, contextLevel,
+                List.copyOf(wildcardPackages));
     }
 
     // -------------------------------------------------------------------------
@@ -306,9 +330,6 @@ public class JavaStructureParser {
         return packages;
     }
 
-    /**
-     * Резолвит тип в qualified name.
-     */
     private String resolveType(Type type,
                                Map<String, String> importMap,
                                List<String> wildcardPackages,
@@ -320,10 +341,6 @@ public class JavaStructureParser {
         return resolveByName(base, suffix, importMap, wildcardPackages, wildcardResolver, filePackage);
     }
 
-    /**
-     * Резолвит имя аннотации в qualified name.
-     * Аннотация не может иметь generic-суффикс, поэтому suffix = "".
-     */
     private String resolveAnnotationName(String simpleName,
                                          Map<String, String> importMap,
                                          List<String> wildcardPackages,
@@ -333,17 +350,7 @@ public class JavaStructureParser {
     }
 
     /**
-     * Общая логика резолюции имени через importMap.
-     *
-     * <p>Порядок шагов:
-     * <ol>
-     *   <li>Explicit import / sibling / nested — через importMap.</li>
-     *   <li>Wildcard resolver — если есть wildcard-импорты и base без точки.</li>
-     *   <li>Same-package fallback — если wildcard-импортов нет вовсе и base без точки.</li>
-     *   <li>Outer.Inner — Outer есть в importMap.</li>
-     *   <li>Outer.Inner — Outer начинается с заглавной и пакет известен.</li>
-     *   <li>Возвращаем как есть.</li>
-     * </ol>
+     * Общая логика резолвинга имени через importMap.
      */
     private String resolveByName(String base,
                                   String suffix,
@@ -394,11 +401,6 @@ public class JavaStructureParser {
     // Private: helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Извлекает аннотации, резолвируя имя аннотации через importMap.
-     * Таким образом {@code AnnotationInfo.name()} всегда содержит qualified name
-     * (если резолюция удалась) или simple name (если импорт не найден).
-     */
     private List<AnnotationInfo> extractAnnotations(NodeList<AnnotationExpr> annotations,
                                                     Map<String, String> importMap,
                                                     List<String> wildcardPackages,
