@@ -19,6 +19,12 @@ import java.util.function.BiFunction;
 /**
  * Парсит Java-исходники с помощью JavaParser и строит {@link ClassStructure}.
  *
+ * <h3>Thread safety</h3>
+ * <p>{@link JavaParser} не является thread-safe (внутреннее состояние JavaCC-парсера),
+ * поэтому экземпляр создаётся на каждый вызов {@link #parse} из иммутабельного
+ * {@link ParserConfiguration}, хранящегося как {@code final}-поле.
+ * Это делает компонент полностью thread-safe.
+ *
  * <h3>resolveType работает в шесть шагов</h3>
  * <ol>
  *   <li><b>Explicit import</b>: {@code import com.example.Foo} → {@code com.example.Foo}.</li>
@@ -53,12 +59,11 @@ public class JavaStructureParser {
     public static final BiFunction<String, List<String>, Optional<String>> NO_OP_RESOLVER =
             (simpleName, pkgs) -> Optional.empty();
 
-    private final JavaParser parser;
+    private final ParserConfiguration parserConfig;
 
     public JavaStructureParser() {
-        ParserConfiguration config = new ParserConfiguration();
-        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
-        this.parser = new JavaParser(config);
+        parserConfig = new ParserConfiguration();
+        parserConfig.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
     }
 
     // -------------------------------------------------------------------------
@@ -67,7 +72,7 @@ public class JavaStructureParser {
 
     public List<ClassStructure> parse(String sourceCode, String sourceFile, int contextLevel,
                                       BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
-        ParseResult<CompilationUnit> result = parser.parse(sourceCode);
+        ParseResult<CompilationUnit> result = new JavaParser(parserConfig).parse(sourceCode);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
             log.warn("Failed to parse {}: {}", sourceFile, result.getProblems());
             return List.of();
@@ -132,8 +137,6 @@ public class JavaStructureParser {
             m.annotations().forEach(a -> rawNames.add(a.name()));
         });
 
-        // Рекурсивно для вложенных классов — они наследуют wildcardImports родителя,
-        // т.к. находятся в том же файле
         cs.nestedClasses().forEach(nc -> {
             collectReferencedTypes(nc).forEach(ref ->
                     rawNames.add(ref.name()));
@@ -349,27 +352,21 @@ public class JavaStructureParser {
         return resolveByName(simpleName, "", importMap, wildcardPackages, wildcardResolver, filePackage);
     }
 
-    /**
-     * Общая логика резолвинга имени через importMap.
-     */
     private String resolveByName(String base,
                                   String suffix,
                                   Map<String, String> importMap,
                                   List<String> wildcardPackages,
                                   BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                   String filePackage) {
-        // 1. Explicit import (+ sibling/nested зарегистрированы через putIfAbsent)
         if (importMap.containsKey(base)) {
             return importMap.get(base) + suffix;
         }
 
         if (!base.contains(".") && !isBuiltinOrJavaLangType(base)) {
-            // 2. Wildcard resolver
             if (!wildcardPackages.isEmpty()) {
                 Optional<String> resolved = wildcardResolver.apply(base, wildcardPackages);
                 return resolved.map(q -> q + suffix).orElse(base + suffix);
             }
-            // 3. Same-package fallback — только если wildcard-импортов нет вовсе
             if (!filePackage.isEmpty()) {
                 return filePackage + "." + base + suffix;
             }
@@ -380,12 +377,10 @@ public class JavaStructureParser {
             String outerSimple = base.substring(0, dot);
             String rest = base.substring(dot);
 
-            // 4. Outer есть в importMap
             if (importMap.containsKey(outerSimple)) {
                 return importMap.get(outerSimple) + rest + suffix;
             }
 
-            // 5. Outer начинается с заглавной — same-package fallback
             if (!filePackage.isEmpty()
                     && !outerSimple.isEmpty()
                     && Character.isUpperCase(outerSimple.charAt(0))) {
@@ -393,7 +388,6 @@ public class JavaStructureParser {
             }
         }
 
-        // 6. Возвращаем как есть
         return base + suffix;
     }
 

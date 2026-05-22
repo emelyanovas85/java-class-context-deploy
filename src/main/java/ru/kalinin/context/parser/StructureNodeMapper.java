@@ -15,6 +15,10 @@ import java.util.List;
 /**
  * Преобразует Java-исходник в список {@link StructureNode} верхнего уровня.
  *
+ * <h3>Thread safety</h3>
+ * <p>{@link JavaParser} не является thread-safe, поэтому экземпляр создаётся
+ * на каждый вызов {@link #map} из иммутабельного {@link ParserConfiguration}.
+ *
  * <p>Каждый {@code StructureNode} с type=class/interface/enum/record/annotation
  * содержит дочерние узлы (поля, методы, конструкторы, вложенные типы).
  * Все узлы содержат строковую сигнатуру и диапазон строк {@code rows}.
@@ -26,9 +30,8 @@ public class StructureNodeMapper {
 
     private final SignatureBuilder sig;
 
-    private final JavaParser parser = new JavaParser(
-            new ParserConfiguration()
-                    .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
+    private final ParserConfiguration parserConfig = new ParserConfiguration()
+            .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
 
     /**
      * Парсит исходник и возвращает {@link StructureNode} для каждого top-level типа.
@@ -38,7 +41,7 @@ public class StructureNodeMapper {
      * @return список узлов верхнего уровня; пустой список при ошибке парсинга
      */
     public List<StructureNode> map(String sourceCode, String sourceFile) {
-        var result = parser.parse(sourceCode);
+        var result = new JavaParser(parserConfig).parse(sourceCode);
         if (!result.isSuccessful() || result.getResult().isEmpty()) {
             log.warn("Failed to build StructureNode for {}: {}", sourceFile, result.getProblems());
             return List.of();
@@ -83,7 +86,6 @@ public class StructureNodeMapper {
     private List<StructureNode> buildChildren(TypeDeclaration<?> type) {
         List<StructureNode> children = new ArrayList<>();
 
-        // enum constants first
         if (type instanceof EnumDeclaration ed) {
             ed.getEntries().forEach(entry ->
                     children.add(new StructureNode(
@@ -93,7 +95,6 @@ public class StructureNodeMapper {
                             null)));
         }
 
-        // fields
         type.getFields().forEach(fd ->
                 fd.getVariables().forEach(v ->
                         children.add(new StructureNode(
@@ -102,7 +103,6 @@ public class StructureNodeMapper {
                                 sig.rows(fd),
                                 null))));
 
-        // constructors
         type.getConstructors().forEach(cd ->
                 children.add(new StructureNode(
                         "constructor",
@@ -110,7 +110,6 @@ public class StructureNodeMapper {
                         sig.rows(cd),
                         null)));
 
-        // methods
         type.getMethods().forEach(md ->
                 children.add(new StructureNode(
                         "method",
@@ -118,7 +117,6 @@ public class StructureNodeMapper {
                         sig.rows(md),
                         null)));
 
-        // record components as fields
         if (type instanceof RecordDeclaration rd) {
             rd.getParameters().forEach(p -> {
                 String annots = p.getAnnotations().stream()
@@ -129,7 +127,6 @@ public class StructureNodeMapper {
             });
         }
 
-        // nested types (recursive)
         type.getMembers().stream()
                 .filter(m -> m instanceof TypeDeclaration)
                 .map(m -> (TypeDeclaration<?>) m)

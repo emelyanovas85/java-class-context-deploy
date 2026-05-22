@@ -1,6 +1,5 @@
 package ru.kalinin.context.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -30,8 +29,8 @@ import java.util.stream.Collectors;
  *   <li>Сборка wildcardResolver: при парсинге каждого файла передаётся лямбда,
  *       которая резолвит (simpleName, wildcardPackages) → qualified name,
  *       используя fileIndex и dependencySources.</li>
- *   <li>Уровень 0: изменённые файлы читаются параллельно (virtual threads),
- *       результаты сливаются в исходном порядке для детерминизма.</li>
+ *   <li>Уровень 0: изменённые файлы читаются, парсятся и маппятся параллельно
+ *       (virtual threads); результаты сливаются в исходном порядке.</li>
  *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
@@ -80,12 +79,15 @@ public class ContextBuilderService {
         this.ioExecutor = ioExecutor;
     }
 
-    // ── Вспомогательный record: результат чтения одного файла уровня 0 ──────────
+    // ── Вспомогательный record: полный результат обработки одного файла уровня 0 ──
 
-    private record Level0FileResult(
+    private record Level0Result(
             String filePath,
             Optional<String> sourceContent,
-            Optional<String> targetContent
+            Optional<String> targetContent,
+            List<ClassStructure> parsed,
+            List<StructureNode> srcNodes,
+            List<StructureNode> tgtNodes
     ) {}
 
     public ContextResponse buildContext(ContextRequest request) {
@@ -120,72 +122,74 @@ public class ContextBuilderService {
         Map<String, Integer> qNameToId = new LinkedHashMap<>();
         AtomicInteger idCounter = new AtomicInteger(1);
 
-        // ── Уровень 0: параллельное чтение изменённых файлов ───────────────────────
+        // ── Уровень 0: параллельные fetch + parse + map ────────────────────────────
         //
-        // Каждый файл требует двух HTTP-запросов к GitLab (source + target ветка).
-        // Запускаем всё параллельно через virtual threads; futures сохраняем
-        // в исходном порядке, чтобы merge был детерминированным.
-        List<String> changedFiles = mrInfo.changedFiles();
-        List<CompletableFuture<Level0FileResult>> readFutures = changedFiles.stream()
+        // Каждый файл: 2 HTTP (source + target) + parse + nodeMapper.map — всё в одном
+        // CompletableFuture. JavaParser и StructureNodeMapper теперь thread-safe
+        // (новый экземпляр JavaParser на каждый вызов parse/map).
+        // Результаты сливаем в исходном порядке changedFiles для детерминированных id.
+        List<CompletableFuture<Level0Result>> futures = mrInfo.changedFiles().stream()
                 .map(filePath -> CompletableFuture.supplyAsync(() -> {
-                    log.debug("Level 0 [parallel]: reading {}", filePath);
+                    log.debug("Level 0 [parallel]: fetch+parse {}", filePath);
+
                     Optional<String> src = gitLabService.readFileContent(
                             request.gitlabUrl(), request.token(),
                             request.projectId(), sourceBranch, filePath);
                     Optional<String> tgt = gitLabService.readFileContent(
                             request.gitlabUrl(), request.token(),
                             request.projectId(), targetBranch, filePath);
-                    return new Level0FileResult(filePath, src, tgt);
+
+                    List<ClassStructure> parsed = src
+                            .map(s -> structureParser.parse(s, filePath, 0, wildcardResolver))
+                            .orElse(List.of());
+                    List<StructureNode> srcNodes = src
+                            .map(s -> nodeMapper.map(s, filePath))
+                            .orElse(List.of());
+                    List<StructureNode> tgtNodes = tgt
+                            .map(s -> nodeMapper.map(s, filePath))
+                            .orElse(null);
+
+                    return new Level0Result(filePath, src, tgt, parsed, srcNodes, tgtNodes);
                 }, ioExecutor))
                 .toList();
 
-        // Ждём все и сливаем в порядке оригинального списка
-        List<Level0FileResult> fileResults = readFutures.stream()
+        List<Level0Result> results = futures.stream()
                 .map(f -> {
                     try {
                         return f.get();
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
-                        throw new IllegalStateException("Interrupted while reading level-0 files", e);
+                        throw new IllegalStateException("Interrupted while processing level-0 files", e);
                     } catch (ExecutionException e) {
-                        throw new IllegalStateException("Failed to read level-0 file", e.getCause());
+                        throw new IllegalStateException("Failed to process level-0 file", e.getCause());
                     }
                 })
                 .toList();
 
-        // Парсинг — однопоточный (structureParser не thread-safe по контракту)
+        // Merge в исходном порядке — однопоточно (общие коллекции не требуют синхронизации)
         List<ClassStructure> level0 = new ArrayList<>();
-        for (Level0FileResult result : fileResults) {
-            String filePath     = result.filePath();
-            Optional<String> sourceContent = result.sourceContent();
-            Optional<String> targetContent = result.targetContent();
+        for (Level0Result r : results) {
+            String filePath = r.filePath();
 
-            if (sourceContent.isPresent() && targetContent.isEmpty())
+            if (r.sourceContent().isPresent() && r.targetContent().isEmpty())
                 log.debug("{} exists only in {} (just created)", filePath, sourceBranch);
-            if (sourceContent.isEmpty() && targetContent.isPresent())
+            if (r.sourceContent().isEmpty() && r.targetContent().isPresent())
                 log.debug("{} exists only in {} (just deleted)", filePath, targetBranch);
 
-            sourceContent.ifPresent(src -> {
-                List<ClassStructure> parsed =
-                        structureParser.parse(src, filePath, 0, wildcardResolver);
-                List<StructureNode> srcNodes = nodeMapper.map(src, filePath);
-                List<StructureNode> tgtNodes = targetContent
-                        .map(tgt -> nodeMapper.map(tgt, filePath))
-                        .orElse(null);
+            if (r.sourceContent().isEmpty()) continue;
 
-                String src0 = repoSource(filePath);
-                parsed.forEach(cs -> {
-                    if (!processedQNames.contains(cs.qualifiedName())) {
-                        int id = idCounter.getAndIncrement();
-                        processedQNames.add(cs.qualifiedName());
-                        qNameToId.put(cs.qualifiedName(), id);
-                        level0.add(cs);
-                        addNestedQNames(cs, processedQNames);
-                        allContexts.add(ClassContext.of(
-                                id, Set.of(), cs.qualifiedName(), 0, src0, srcNodes, tgtNodes));
-                    }
-                });
-            });
+            String src0 = repoSource(filePath);
+            for (ClassStructure cs : r.parsed()) {
+                if (!processedQNames.contains(cs.qualifiedName())) {
+                    int id = idCounter.getAndIncrement();
+                    processedQNames.add(cs.qualifiedName());
+                    qNameToId.put(cs.qualifiedName(), id);
+                    level0.add(cs);
+                    addNestedQNames(cs, processedQNames);
+                    allContexts.add(ClassContext.of(
+                            id, Set.of(), cs.qualifiedName(), 0, src0, r.srcNodes(), r.tgtNodes()));
+                }
+            }
         }
 
         // ── Уровни 1..depth: зависимости ───────────────────────────────────────────
