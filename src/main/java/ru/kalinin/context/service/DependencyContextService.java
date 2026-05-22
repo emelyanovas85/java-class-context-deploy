@@ -19,6 +19,10 @@ import java.util.*;
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
  *   <li>Для каждой зависимости получить путь к sources.jar на диске
  *       (скачать если нет) и проиндексировать классы.</li>
+ *   <li>Рекурсивно обработать транзитивные api-зависимости:
+ *       для каждой зависимости ищем .module файл в Artifactory,
+ *       извлекаем блок apiElements и добавляем новые координаты в очередь.
+ *       Используется {@code visited} для защиты от циклов.</li>
  * </ol>
  *
  * <p>Результат — {@code Map<String, Path>}: qualified name класса → путь к jar на диске.
@@ -35,9 +39,10 @@ public class DependencyContextService {
     private final DependencyClassNameExtractor classNameExtractor;
 
     /**
-     * Собирает карту «qualified name → путь к jar на диске» для всех классов из зависимостей.
+     * Собирает карту «qualified name → путь к jar на диске» для всех классов из зависимостей,
+     * включая транзитивные api-зависимости.
      *
-     * <p>Jar-файлы сохраняются в {@code /artifacts} и при повторном запросе
+     * <p>Jar-файлы и .module-файлы сохраняются в {@code /artifacts} и при повторном запросе
      * берутся с диска без сетевого вызова.
      *
      * @param gitlabUrl URL GitLab-инстанса
@@ -80,8 +85,8 @@ public class DependencyContextService {
             return Map.of();
         }
 
-        // 4. Извлечь зависимости с версиями
-        List<DependencyCoordinate> allDeps = new ArrayList<>();
+        // 4. Извлечь прямые зависимости из файлов сборки
+        List<DependencyCoordinate> directDeps = new ArrayList<>();
         for (Map.Entry<String, String> entry : buildFileContents.entrySet()) {
             String fileName = entry.getKey().contains("/")
                     ? entry.getKey().substring(entry.getKey().lastIndexOf('/') + 1)
@@ -95,7 +100,7 @@ public class DependencyContextService {
                             extractor -> {
                                 try {
                                     List<DependencyCoordinate> deps = extractor.extract(content);
-                                    allDeps.addAll(deps);
+                                    directDeps.addAll(deps);
                                     log.debug("Extracted {} deps from {}", deps.size(), entry.getKey());
                                 } catch (UnsupportedOperationException ex) {
                                     log.info("Extractor for {} not yet implemented, skipping", fileName);
@@ -105,23 +110,46 @@ public class DependencyContextService {
                     );
         }
 
-        if (allDeps.isEmpty()) {
+        if (directDeps.isEmpty()) {
             log.info("No versioned dependencies found");
             return Map.of();
         }
-        log.info("Total versioned dependencies to process: {}", allDeps.size());
+        log.info("Direct versioned dependencies found: {}", directDeps.size());
 
-        // 5. Для каждого dep получить путь к jar на диске и проиндексировать классы
+        // 5. Рекурсивно обходим все зависимости (прямые + api-транзитивные)
         Map<String, Path> dependencySources = new HashMap<>();
-        for (DependencyCoordinate dep : allDeps) {
+        // Ключ visited: "groupId:artifactId:version", чтобы не обрабатывать одну зависимость дважды
+        Set<String> visited = new HashSet<>();
+        Deque<DependencyCoordinate> queue = new ArrayDeque<>(directDeps);
+
+        while (!queue.isEmpty()) {
+            DependencyCoordinate dep = queue.poll();
+            String depKey = dep.toString();
+            if (!visited.add(depKey)) {
+                continue; // уже обработано
+            }
+
+            // скачать sources.jar и проиндексировать классы
             sourcesLoader.resolveSourcesJar(artifactoryUrls, dep).ifPresent(jarPath -> {
-                Set<String> classNames = classNameExtractor.extractClassNames(jarPath, dep.toString());
+                Set<String> classNames = classNameExtractor.extractClassNames(jarPath, depKey);
                 classNames.forEach(qName -> dependencySources.put(qName, jarPath));
                 log.debug("Indexed {} classes from {}", classNames.size(), dep);
             });
+
+            // попытаться найти .module и раскрыть api-зависимости
+            sourcesLoader.resolveModuleFile(artifactoryUrls, dep).ifPresent(moduleFile -> {
+                List<DependencyCoordinate> apiDeps =
+                        sourcesLoader.parseApiDependencies(moduleFile, dep);
+                for (DependencyCoordinate apiDep : apiDeps) {
+                    if (!visited.contains(apiDep.toString())) {
+                        log.debug("Queuing transitive api dep from {}: {}", dep, apiDep);
+                        queue.add(apiDep);
+                    }
+                }
+            });
         }
 
-        log.info("Total dependency classes indexed: {}", dependencySources.size());
+        log.info("Total dependency classes indexed (incl. transitive api): {}", dependencySources.size());
         return Collections.unmodifiableMap(dependencySources);
     }
 }
