@@ -15,9 +15,11 @@ import java.util.List;
  *   <li>{@code rows}   — диапазон строк ({@code "17"} или {@code "19-22"}),
  *       выравнивается по правому краю в поле шириной 10 символов.</li>
  *   <li>{@code indent} — 4 пробела × глубина узла.</li>
- *   <li>Многострочная сигнатура разбивается на части: каждая строка
- *       получает одинаковый отступ; колонка rows заполняется только
- *       для первой строки (у остальных — пробелы).</li>
+ *   <li>Многострочная сигнатура разбивается на части: каждой строке
+ *       присваивается свой номер, начиная с {@code startLine}.
+ *       Последняя строка сигнатуры получает оставшийся диапазон
+ *       ({@code "lastStart"} или {@code "lastStart-end"} если end > lastStart).
+ *       Пустых ячеек (emptyCell) не остаётся.</li>
  *   <li>Узлы одного уровня сортируются по начальному номеру строки перед выводом.
  *       Узлы без номера строки опускаются в конец.</li>
  * </ul>
@@ -60,11 +62,27 @@ public final class StructureNodePrinter {
     private static void renderNode(StructureNode node, int depth, StringBuilder sb) {
         String indent    = " ".repeat(INDENT_SIZE * depth);
         String[] sigLines = splitSignature(node.signature());
-        String rowsCell  = formatRows(node.rows());
-        String emptyCell = " ".repeat(ROWS_WIDTH);
+        int n = sigLines.length;
 
-        for (int i = 0; i < sigLines.length; i++) {
-            String cell = (i == 0) ? rowsCell : emptyCell;
+        int[] range = parseRange(node.rows());  // [start, end], или null
+
+        for (int i = 0; i < n; i++) {
+            String cell;
+            if (range == null) {
+                // нет диапазона — только первая строка получает исходный rows (или пусто)
+                cell = (i == 0) ? formatRows(node.rows()) : " ".repeat(ROWS_WIDTH);
+            } else {
+                int start = range[0];
+                int end   = range[1];
+                int lineNo = start + i;
+                if (i == n - 1) {
+                    // последняя строка сигнатуры — остаток диапазона
+                    cell = formatRows(lineNo == end ? String.valueOf(lineNo)
+                                                    : lineNo + "-" + end);
+                } else {
+                    cell = formatRows(String.valueOf(lineNo));
+                }
+            }
             sb.append('|').append(cell)
               .append('|').append(indent).append(sigLines[i])
               .append('\n');
@@ -74,6 +92,27 @@ public final class StructureNodePrinter {
             for (StructureNode child : sorted(node.children())) {
                 renderNode(child, depth + 1, sb);
             }
+        }
+    }
+
+    /**
+     * Парсит {@code rows} в массив {@code [start, end]}.
+     * {@code "17"} → {@code [17, 17]}, {@code "19-22"} → {@code [19, 22]}.
+     * Возвращает {@code null} если строка пустая или не числовая.
+     */
+    private static int[] parseRange(String rows) {
+        if (rows == null || rows.isBlank()) return null;
+        try {
+            int dash = rows.indexOf('-');
+            if (dash < 0) {
+                int v = Integer.parseInt(rows.strip());
+                return new int[]{v, v};
+            }
+            int start = Integer.parseInt(rows.substring(0, dash).strip());
+            int end   = Integer.parseInt(rows.substring(dash + 1).strip());
+            return new int[]{start, end};
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -94,16 +133,8 @@ public final class StructureNodePrinter {
     }
 
     private static int startLine(StructureNode node) {
-        String rows = node.rows();
-        if (rows == null || rows.isBlank()) {
-            return Integer.MAX_VALUE;
-        }
-        String first = rows.contains("-") ? rows.substring(0, rows.indexOf('-')) : rows;
-        try {
-            return Integer.parseInt(first.strip());
-        } catch (NumberFormatException e) {
-            return Integer.MAX_VALUE;
-        }
+        int[] range = parseRange(node.rows());
+        return range != null ? range[0] : Integer.MAX_VALUE;
     }
 
     /**
