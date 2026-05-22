@@ -19,4 +19,19 @@ public record ModifiedClassContext(
         List<StructureNode> structureSource,
         List<StructureNode> structureTarget
 ) implements ClassContext {
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        String header = "### " + name + "  [level=" + level + ", id=" + id + ", callers=" + callerIds + ", source=" + source + "]";
+        if (structureSource != null) {
+            sb.append(header).append("  [branch=source]\n");
+            sb.append(StructureNodePrinter.render(structureSource, 0));
+        }
+        if (structureTarget != null) {
+            sb.append(header).append("  [branch=target]\n");
+            sb.append(StructureNodePrinter.render(structureTarget, 0));
+        }
+        return sb.toString();
+    }
 }

@@ -152,7 +152,6 @@ public class ContextBuilderService {
             log.debug("Depth {}: resolving {} referenced types", depth, referencedTypes.size());
 
             List<ClassStructure> nextLevel = new ArrayList<>();
-            int finalDepth = depth;
 
             for (String qName : referencedTypes) {
                 Set<Integer> callerIds = refToCallerIds.getOrDefault(qName, Set.of());
@@ -163,14 +162,14 @@ public class ContextBuilderService {
                                 request.projectId(), sourceBranch, processedQNames);
 
                 if (repoSource.isPresent()) {
-                    addFromRepoSource(repoSource.get(), finalDepth, callerIds, wildcardResolver,
+                    addFromRepoSource(repoSource.get(), depth, callerIds, wildcardResolver,
                             nextLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
 
                 Path jarPath = dependencySources.get(qName);
                 if (jarPath != null) {
-                    addFromJar(jarPath, qName, finalDepth, callerIds, wildcardResolver,
+                    addFromJar(jarPath, qName, depth, callerIds, wildcardResolver,
                             nextLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
@@ -216,7 +215,7 @@ public class ContextBuilderService {
                 if (jarPath != null) {
                     addFromJar(jarPath, qName, request.depth(), callerIds, wildcardResolver,
                             finalPassLevel, processedQNames, qNameToId, idCounter, allContexts);
-                    continue;
+//                    continue;
                 }
             }
 
@@ -257,7 +256,7 @@ public class ContextBuilderService {
      * {@code "main"} в остальных случаях.
      */
     private static String repoSource(String filePath) {
-        return filePath.startsWith("src/test/") ? "test" : "main";
+        return filePath.startsWith("src/test/") ? "src/test" : "src/main";
     }
 
     /**

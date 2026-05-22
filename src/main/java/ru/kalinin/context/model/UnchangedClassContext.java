@@ -22,4 +22,13 @@ public record UnchangedClassContext(
     public List<StructureNode> structure() {
         return structure;
     }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        String header = "### " + name + "  [level=" + level + ", id=" + id + ", callers=" + callerIds + ", source=" + source + "]";
+        sb.append(header).append("  [unchanged]\n");
+        sb.append(StructureNodePrinter.render(structure, 0));
+        return sb.toString();
+    }
 }
