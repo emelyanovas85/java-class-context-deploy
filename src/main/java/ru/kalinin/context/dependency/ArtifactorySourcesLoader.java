@@ -21,8 +21,11 @@ import java.util.regex.Pattern;
  *
  * <h3>Кэширование на диске</h3>
  * <p>Каждый скачанный jar сохраняется в директорию {@code artifactsDir}
- * (по умолчанию {@code /artifacts}) под именем
- * {@code <groupId>-<artifactId>-<version>-sources.jar}.
+ * (по умолчанию {@code /artifacts}) под имене
+ * {@code groupId__artifactId__version-sources.jar}.
+ * Двойное подчёркивание ({@code __}) как разделитель устраняет неоднозначность
+ * при парсинге, возникающую когда groupId, artifactId или version сами
+ * содержат дефисы.
  * При повторном запросе файл читается с диска без сетевого вызова.
  * Байты в памяти не удерживаются — метод возвращает {@link Path}.
  *
@@ -115,7 +118,7 @@ public class ArtifactorySourcesLoader {
             return Optional.empty();
         }
 
-        Path localPath = artifactsDir.resolve(localFileName(dep));
+        Path localPath = artifactsDir.resolve(dep.localFileName());
 
         if (Files.exists(localPath)) {
             log.debug("sources.jar cache hit (disk): {}", localPath);
@@ -139,12 +142,12 @@ public class ArtifactorySourcesLoader {
                 if (bytes != null && bytes.length > 0) {
                     Files.write(localPath, bytes,
                             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                    log.info("Downloaded and saved sources.jar ({} bytes) → {}: {}",
+                    log.info("Downloaded and saved sources.jar ({} bytes) \u2192 {}: {}",
                             bytes.length, localPath, dep);
                     return Optional.of(localPath);
                 }
             } catch (RestClientException e) {
-                log.debug("Not found in {}: {} — {}", repoUrl, dep, e.getMessage());
+                log.debug("Not found in {}: {} \u2014 {}", repoUrl, dep, e.getMessage());
             } catch (IOException e) {
                 log.warn("Failed to save sources.jar for {} to {}: {}", dep, localPath, e.getMessage());
             }
@@ -157,17 +160,6 @@ public class ArtifactorySourcesLoader {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
-
-    /**
-     * Имя файла на диске: {@code groupId-artifactId-version-sources.jar}.
-     * Точки в groupId заменяются на дефисы для совместимости с ФС.
-     */
-    private static String localFileName(DependencyCoordinate dep) {
-        return dep.groupId().replace('.', '-')
-                + '-' + dep.artifactId()
-                + '-' + dep.version()
-                + "-sources.jar";
-    }
 
     /**
      * Удаляет замыкающие нежелательные символы с конца URL:
