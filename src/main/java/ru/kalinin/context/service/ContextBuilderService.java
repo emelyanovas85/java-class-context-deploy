@@ -12,6 +12,7 @@ import ru.kalinin.context.parser.UnresolvedTypeRef;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
@@ -36,12 +37,17 @@ import java.util.stream.Collectors;
  *       Типы, не попавшие в processedQNames, ищутся в repo / dependencySources.</li>
  * </ol>
  *
+ * <h3>Граф зависимостей</h3>
+ * <p>Каждый {@link ClassContext} несёт сквозной {@code id} (монотонно возрастающий)
+ * и {@code callerIds} — множество id классов, которые непосредственно ссылаются
+ * на данный. Классы уровня 0 имеют пустой {@code callerIds}.
+ *
  * <h3>Пост-резолвинг wildcard-типов</h3>
  * <p>Если при парсинге тип не удалось резолвить через wildcardResolver (например,
  * зависимость не была в dependencySources), имя сохраняется как simple name.
  * Финальный проход использует {@code enrichedQNames} только для {@link #resolveRef} —
  * основной {@code processedQNames} не изменяется, поэтому классы из jar/repo,
- * которые ещё не были загружены, не блокируются как «уже обработанные».
+ * ещё не загруженные, не блокируются как «уже обработанные».
  */
 @Slf4j
 @Service
@@ -86,6 +92,10 @@ public class ContextBuilderService {
         List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
 
+        // qName → id уже добавленного ClassContext — для построения callerIds
+        Map<String, Integer> qNameToId = new LinkedHashMap<>();
+        AtomicInteger idCounter = new AtomicInteger(1);
+
         // ── Уровень 0: изменённые файлы ────────────────────────────────────────────
         List<ClassStructure> level0 = new ArrayList<>();
         for (String filePath : mrInfo.changedFiles()) {
@@ -115,11 +125,13 @@ public class ContextBuilderService {
 
                 parsed.forEach(cs -> {
                     if (!processedQNames.contains(cs.qualifiedName())) {
+                        int id = idCounter.getAndIncrement();
                         processedQNames.add(cs.qualifiedName());
+                        qNameToId.put(cs.qualifiedName(), id);
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
                         allContexts.add(ClassContext.of(
-                                cs.qualifiedName(), 0, srcNodes, tgtNodes));
+                                id, Set.of(), cs.qualifiedName(), 0, srcNodes, tgtNodes));
                     }
                 });
             });
@@ -130,7 +142,9 @@ public class ContextBuilderService {
         List<ClassStructure> allParsed = new ArrayList<>(level0);
 
         for (int depth = 1; depth <= request.depth(); depth++) {
-            Set<String> referencedTypes = collectAndResolveRefs(currentLevel, processedQNames);
+            // Собираем: для каждого referenced type → set id классов, которые на него ссылаются
+            Map<String, Set<Integer>> refToCallerIds = collectRefToCallerIds(currentLevel, processedQNames, qNameToId);
+            Set<String> referencedTypes = new LinkedHashSet<>(refToCallerIds.keySet());
             referencedTypes.removeAll(processedQNames);
             if (referencedTypes.isEmpty()) break;
 
@@ -140,6 +154,8 @@ public class ContextBuilderService {
             int finalDepth = depth;
 
             for (String qName : referencedTypes) {
+                Set<Integer> callerIds = refToCallerIds.getOrDefault(qName, Set.of());
+
                 // 1. Поиск в репозитории: сначала точный, затем откусывание сегментов
                 Optional<Map.Entry<String, String>> repoSource =
                         findRepoSourceForType(qName, fileIndex,
@@ -147,16 +163,16 @@ public class ContextBuilderService {
                                 request.projectId(), sourceBranch, processedQNames);
 
                 if (repoSource.isPresent()) {
-                    addFromRepoSource(repoSource.get(), finalDepth, wildcardResolver,
-                            nextLevel, processedQNames, allContexts);
+                    addFromRepoSource(repoSource.get(), finalDepth, callerIds, wildcardResolver,
+                            nextLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
 
                 // 2. Точный поиск в dependencySources
                 Path jarPath = dependencySources.get(qName);
                 if (jarPath != null) {
-                    addFromJar(jarPath, qName, finalDepth, wildcardResolver,
-                            nextLevel, processedQNames, allContexts);
+                    addFromJar(jarPath, qName, finalDepth, callerIds, wildcardResolver,
+                            nextLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
 
@@ -168,17 +184,14 @@ public class ContextBuilderService {
         }
 
         // ── Финальный пост-проход ───────────────────────────────────────────────────
-        // enrichedQNames = processedQNames + все qualified refs из allParsed.
-        // Используется ТОЛЬКО для resolveRef — основной processedQNames не трогаем,
-        // чтобы не заблокировать поиск классов из jar/repo, ещё не загруженных.
         Set<String> enrichedQNames = new LinkedHashSet<>(processedQNames);
         collectRawRefs(allParsed).stream()
                 .filter(ref -> !ref.isUnresolved())
                 .map(UnresolvedTypeRef::name)
                 .forEach(enrichedQNames::add);
 
-        Set<String> unresolvedBeforeFinalPass = collectAndResolveRefs(allParsed, enrichedQNames)
-                .stream()
+        Map<String, Set<Integer>> finalRefToCallerIds = collectRefToCallerIds(allParsed, enrichedQNames, qNameToId);
+        Set<String> unresolvedBeforeFinalPass = finalRefToCallerIds.keySet().stream()
                 .filter(name -> !processedQNames.contains(name))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
@@ -187,21 +200,23 @@ public class ContextBuilderService {
             List<ClassStructure> finalPassLevel = new ArrayList<>();
 
             for (String qName : unresolvedBeforeFinalPass) {
+                Set<Integer> callerIds = finalRefToCallerIds.getOrDefault(qName, Set.of());
+
                 Optional<Map.Entry<String, String>> repoSource =
                         findRepoSourceForType(qName, fileIndex,
                                 request.gitlabUrl(), request.token(),
                                 request.projectId(), sourceBranch, processedQNames);
 
                 if (repoSource.isPresent()) {
-                    addFromRepoSource(repoSource.get(), request.depth(), wildcardResolver,
-                            finalPassLevel, processedQNames, allContexts);
+                    addFromRepoSource(repoSource.get(), request.depth(), callerIds, wildcardResolver,
+                            finalPassLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
 
                 Path jarPath = dependencySources.get(qName);
                 if (jarPath != null) {
-                    addFromJar(jarPath, qName, request.depth(), wildcardResolver,
-                            finalPassLevel, processedQNames, allContexts);
+                    addFromJar(jarPath, qName, request.depth(), callerIds, wildcardResolver,
+                            finalPassLevel, processedQNames, qNameToId, idCounter, allContexts);
                     continue;
                 }
             }
@@ -210,10 +225,7 @@ public class ContextBuilderService {
         }
 
         // ── Итоговый отчёт: нерезолвленные типы ───────────────────────────────────
-        // Нерезолвленным считается ref, для которого resolveRef вернул то же simple name
-        // (не подтянулся через wildcards enrichedQNames) И оно не в processedQNames
         if (log.isInfoEnabled()) {
-            // Обновляем enrichedQNames после финального прохода
             collectRawRefs(allParsed).stream()
                     .filter(ref -> !ref.isUnresolved())
                     .map(UnresolvedTypeRef::name)
@@ -329,7 +341,7 @@ public class ContextBuilderService {
     }
 
     // -------------------------------------------------------------------------
-    // collectRawRefs / collectAndResolveRefs
+    // collectRawRefs / collectAndResolveRefs / collectRefToCallerIds
     // -------------------------------------------------------------------------
 
     /**
@@ -345,24 +357,48 @@ public class ContextBuilderService {
 
     /**
      * Собирает все типы-зависимости со всех классов и пробует
-     * резолвить нерезолвленные (simple name) через уже известные {@code processedQNames}.
+     * резолвить нерезолвленные (simple name) через уже известные {@code knownQNames}.
      */
     private Set<String> collectAndResolveRefs(List<ClassStructure> classes,
-                                               Set<String> processedQNames) {
+                                               Set<String> knownQNames) {
         Set<String> resolved = new LinkedHashSet<>();
         for (UnresolvedTypeRef ref : collectRawRefs(classes)) {
-            resolved.add(resolveRef(ref, processedQNames));
+            resolved.add(resolveRef(ref, knownQNames));
         }
         return resolved;
     }
 
     /**
-     * Пробует резолвить {@link UnresolvedTypeRef} через {@code processedQNames}.
+     * Для каждого referenced type строит mapping: resolvedQName → Set&lt;callerId&gt;.
+     * callerId — id ClassContext того класса, который ссылается на данный тип.
+     * Классы, для которых id ещё не назначен (нет в qNameToId), пропускаются как caller.
+     */
+    private Map<String, Set<Integer>> collectRefToCallerIds(
+            List<ClassStructure> classes,
+            Set<String> knownQNames,
+            Map<String, Integer> qNameToId) {
+
+        Map<String, Set<Integer>> result = new LinkedHashMap<>();
+        for (ClassStructure cs : classes) {
+            Integer callerId = qNameToId.get(cs.qualifiedName());
+            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
+                String resolved = resolveRef(ref, knownQNames);
+                result.computeIfAbsent(resolved, k -> new LinkedHashSet<>());
+                if (callerId != null) {
+                    result.get(resolved).add(callerId);
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Пробует резолвить {@link UnresolvedTypeRef} через {@code knownQNames}.
      * Если имя уже qualified (содержит точку) — возвращает как есть.
-     * Если simple name — ищет в processedQNames по правилу:
+     * Если simple name — ищет в knownQNames по правилу:
      * {@code qName.endsWith("." + simpleName) && wildcardPackages.contains(pkg(qName))}.
      */
-    private String resolveRef(UnresolvedTypeRef ref, Set<String> processedQNames) {
+    private String resolveRef(UnresolvedTypeRef ref, Set<String> knownQNames) {
         if (!ref.isUnresolved()) return ref.name();
 
         String simpleName = ref.name();
@@ -371,7 +407,7 @@ public class ContextBuilderService {
 
         String suffix = "." + simpleName;
         List<String> candidates = new ArrayList<>();
-        for (String qName : processedQNames) {
+        for (String qName : knownQNames) {
             if (qName.endsWith(suffix)) {
                 String pkg = qName.substring(0, qName.length() - suffix.length());
                 if (wildcards.contains(pkg)) {
@@ -396,8 +432,10 @@ public class ContextBuilderService {
     // -------------------------------------------------------------------------
 
     private void addFromRepoSource(Map.Entry<String, String> source, int depth,
+                                   Set<Integer> callerIds,
                                    BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                                    List<ClassStructure> nextLevel, Set<String> processedQNames,
+                                   Map<String, Integer> qNameToId, AtomicInteger idCounter,
                                    List<ClassContext> allContexts) {
         String filePath = source.getKey();
         String content = source.getValue();
@@ -407,17 +445,21 @@ public class ContextBuilderService {
 
         parsed.forEach(cs -> {
             if (!processedQNames.contains(cs.qualifiedName())) {
+                int id = idCounter.getAndIncrement();
                 processedQNames.add(cs.qualifiedName());
+                qNameToId.put(cs.qualifiedName(), id);
                 nextLevel.add(cs);
                 addNestedQNames(cs, processedQNames);
-                allContexts.add(ClassContext.of(cs.qualifiedName(), depth, nodes, nodes));
+                allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, nodes, nodes));
             }
         });
     }
 
     private void addFromJar(Path jarPath, String qName, int depth,
+                            Set<Integer> callerIds,
                             BiFunction<String, List<String>, Optional<String>> wildcardResolver,
                             List<ClassStructure> nextLevel, Set<String> processedQNames,
+                            Map<String, Integer> qNameToId, AtomicInteger idCounter,
                             List<ClassContext> allContexts) {
         classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
             String syntheticPath = qName.replace('.', '/') + ".java";
@@ -427,10 +469,12 @@ public class ContextBuilderService {
 
             parsed.forEach(cs -> {
                 if (!processedQNames.contains(cs.qualifiedName())) {
+                    int id = idCounter.getAndIncrement();
                     processedQNames.add(cs.qualifiedName());
+                    qNameToId.put(cs.qualifiedName(), id);
                     nextLevel.add(cs);
                     addNestedQNames(cs, processedQNames);
-                    allContexts.add(ClassContext.of(cs.qualifiedName(), depth, nodes, nodes));
+                    allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, nodes, nodes));
                 }
             });
             log.debug("Resolved '{}' from sources.jar on disk", qName);

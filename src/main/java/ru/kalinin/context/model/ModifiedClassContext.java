@@ -4,21 +4,26 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * Контекст класса, структура которого изменилась: source и target различаются,
  * либо одна из веток null (файл создан или удалён).
  *
+ * @param id               сквозной уникальный идентификатор
  * @param name             qualified name класса
  * @param level            уровень контекста
+ * @param callerIds        id классов, которые ссылаются на данный
  * @param structureSource  структура source-ветки (null — файл удалён)
  * @param structureTarget  структура target-ветки (null — файл создан)
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @Schema(description = "Класс с изменениями: source и target различаются")
 public record ModifiedClassContext(
+        int id,
         String name,
         int level,
+        Set<Integer> callerIds,
         List<StructureNode> structureSource,
         List<StructureNode> structureTarget
 ) implements ClassContext {
@@ -26,7 +31,7 @@ public record ModifiedClassContext(
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        String header = "### " + name + "  [level=" + level + "]";
+        String header = "### " + name + "  [id=" + id + ", level=" + level + ", callers=" + callerIds + "]";
         if (structureSource != null) {
             sb.append(header).append("  [source]\n");
             sb.append(StructureNodePrinter.render(structureSource, 0));
