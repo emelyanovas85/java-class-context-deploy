@@ -15,9 +15,9 @@ public record DependencyCoordinate(
 
     /**
      * Разделитель между groupId, artifactId и version в имени файла на диске.
-     * Двойное подчёркивание устраняет неоднозначность, возникающую при
-     * использовании одинарного {@code -}, поскольку groupId, artifactId и version
-     * сами могут содержать дефисы.
+     * Двойное подчёркивание ({@code __}) устраняет неоднозначность, возникающую при
+     * использовании одинарного {@code -}, поскольку groupId, artifactId или version сами
+     * могут содержать дефисы.
      */
     static final String SEPARATOR = "__";
 
@@ -36,8 +36,13 @@ public record DependencyCoordinate(
         return artifactId + '-' + version + "-sources.jar";
     }
 
+    /** Имя Gradle Module Metadata файла: {@code spring-boot-starter-web-3.4.1.module} */
+    public String moduleFileName() {
+        return artifactId + '-' + version + ".module";
+    }
+
     /**
-     * Имя файла на диске:
+     * Имя файла на диске для sources.jar:
      * {@code groupId__artifactId__version-sources.jar}.
      *
      * <p>Дочерние и дефисы внутри каждого сегмента сохраняются без замены —
@@ -47,6 +52,16 @@ public record DependencyCoordinate(
      */
     public String localFileName() {
         return groupId + SEPARATOR + artifactId + SEPARATOR + version + "-sources.jar";
+    }
+
+    /**
+     * Имя файла на диске для .module:
+     * {@code groupId__artifactId__version.module}.
+     *
+     * <p>Пример: {@code org.aspectj__aspectjweaver__1.9.22.module}
+     */
+    public String localModuleFileName() {
+        return groupId + SEPARATOR + artifactId + SEPARATOR + version + ".module";
     }
 
     /**
