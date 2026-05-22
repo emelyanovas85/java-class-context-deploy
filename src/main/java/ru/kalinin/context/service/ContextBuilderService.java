@@ -2,6 +2,7 @@ package ru.kalinin.context.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.dependency.DependencyClassNameExtractor;
 import ru.kalinin.context.dependency.DependencyCoordinate;
@@ -13,6 +14,7 @@ import ru.kalinin.context.parser.UnresolvedTypeRef;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -28,7 +30,8 @@ import java.util.stream.Collectors;
  *   <li>Сборка wildcardResolver: при парсинге каждого файла передаётся лямбда,
  *       которая резолвит (simpleName, wildcardPackages) → qualified name,
  *       используя fileIndex и dependencySources.</li>
- *   <li>Уровень 0: изменённые файлы.</li>
+ *   <li>Уровень 0: изменённые файлы читаются параллельно (virtual threads),
+ *       результаты сливаются в исходном порядке для детерминизма.</li>
  *   <li>Уровни 1..depth: зависимости; поиск по repo выполняется
  *       через {@link #findRepoSourceForType}: сначала точный поиск, затем
  *       последовательное откусывание сегментов (для Outer.Inner, Outer.Inner.Deep).</li>
@@ -52,7 +55,6 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ContextBuilderService {
 
     private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
@@ -62,6 +64,29 @@ public class ContextBuilderService {
     private final StructureNodeMapper nodeMapper;
     private final DependencyContextService dependencyContextService;
     private final DependencyClassNameExtractor classNameExtractor;
+    private final ExecutorService ioExecutor;
+
+    public ContextBuilderService(GitLabService gitLabService,
+                                 JavaStructureParser structureParser,
+                                 StructureNodeMapper nodeMapper,
+                                 DependencyContextService dependencyContextService,
+                                 DependencyClassNameExtractor classNameExtractor,
+                                 @Qualifier("ioExecutor") ExecutorService ioExecutor) {
+        this.gitLabService = gitLabService;
+        this.structureParser = structureParser;
+        this.nodeMapper = nodeMapper;
+        this.dependencyContextService = dependencyContextService;
+        this.classNameExtractor = classNameExtractor;
+        this.ioExecutor = ioExecutor;
+    }
+
+    // ── Вспомогательный record: результат чтения одного файла уровня 0 ──────────
+
+    private record Level0FileResult(
+            String filePath,
+            Optional<String> sourceContent,
+            Optional<String> targetContent
+    ) {}
 
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
@@ -92,29 +117,53 @@ public class ContextBuilderService {
 
         List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
-
-        // qName → id уже добавленного ClassContext — для построения callerIds
         Map<String, Integer> qNameToId = new LinkedHashMap<>();
         AtomicInteger idCounter = new AtomicInteger(1);
 
-        // ── Уровень 0: изменённые файлы ────────────────────────────────────────────
-        List<ClassStructure> level0 = new ArrayList<>();
-        for (String filePath : mrInfo.changedFiles()) {
-            log.debug("Level 0: reading {}", filePath);
+        // ── Уровень 0: параллельное чтение изменённых файлов ───────────────────────
+        //
+        // Каждый файл требует двух HTTP-запросов к GitLab (source + target ветка).
+        // Запускаем всё параллельно через virtual threads; futures сохраняем
+        // в исходном порядке, чтобы merge был детерминированным.
+        List<String> changedFiles = mrInfo.changedFiles();
+        List<CompletableFuture<Level0FileResult>> readFutures = changedFiles.stream()
+                .map(filePath -> CompletableFuture.supplyAsync(() -> {
+                    log.debug("Level 0 [parallel]: reading {}", filePath);
+                    Optional<String> src = gitLabService.readFileContent(
+                            request.gitlabUrl(), request.token(),
+                            request.projectId(), sourceBranch, filePath);
+                    Optional<String> tgt = gitLabService.readFileContent(
+                            request.gitlabUrl(), request.token(),
+                            request.projectId(), targetBranch, filePath);
+                    return new Level0FileResult(filePath, src, tgt);
+                }, ioExecutor))
+                .toList();
 
-            Optional<String> sourceContent = gitLabService.readFileContent(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), sourceBranch, filePath
-            );
-            Optional<String> targetContent = gitLabService.readFileContent(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), targetBranch, filePath
-            );
+        // Ждём все и сливаем в порядке оригинального списка
+        List<Level0FileResult> fileResults = readFutures.stream()
+                .map(f -> {
+                    try {
+                        return f.get();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("Interrupted while reading level-0 files", e);
+                    } catch (ExecutionException e) {
+                        throw new IllegalStateException("Failed to read level-0 file", e.getCause());
+                    }
+                })
+                .toList();
+
+        // Парсинг — однопоточный (structureParser не thread-safe по контракту)
+        List<ClassStructure> level0 = new ArrayList<>();
+        for (Level0FileResult result : fileResults) {
+            String filePath     = result.filePath();
+            Optional<String> sourceContent = result.sourceContent();
+            Optional<String> targetContent = result.targetContent();
 
             if (sourceContent.isPresent() && targetContent.isEmpty())
                 log.debug("{} exists only in {} (just created)", filePath, sourceBranch);
             if (sourceContent.isEmpty() && targetContent.isPresent())
-                log.debug("{} exists only in {} (just deleted)", filePath, targetContent);
+                log.debug("{} exists only in {} (just deleted)", filePath, targetBranch);
 
             sourceContent.ifPresent(src -> {
                 List<ClassStructure> parsed =
@@ -215,7 +264,6 @@ public class ContextBuilderService {
                 if (jarPath != null) {
                     addFromJar(jarPath, qName, request.depth(), callerIds, wildcardResolver,
                             finalPassLevel, processedQNames, qNameToId, idCounter, allContexts);
-//                    continue;
                 }
             }
 
@@ -250,20 +298,10 @@ public class ContextBuilderService {
     // Source label helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Определяет метку источника по пути файла в репозитории.
-     * Возвращает {@code "test"} для {@code src/test/java/...},
-     * {@code "main"} в остальных случаях.
-     */
     private static String repoSource(String filePath) {
         return filePath.startsWith("src/test/") ? "src/test" : "src/main";
     }
 
-    /**
-     * Определяет метку источника по пути к jar на диске.
-     * Использует {@link DependencyCoordinate#fromLocalFileName} для парсинга имени файла.
-     * Если формат не распознан — возвращает имя файла как есть.
-     */
     private static String jarSource(Path jarPath) {
         String fileName = jarPath.getFileName().toString();
         DependencyCoordinate coord = DependencyCoordinate.fromLocalFileName(fileName);
