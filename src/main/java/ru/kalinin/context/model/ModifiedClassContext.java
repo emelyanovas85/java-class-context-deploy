@@ -23,13 +23,17 @@ public record ModifiedClassContext(
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        String header = "### " + name + "  [level=" + level + ", id=" + id + ", callers=" + callerIds + ", source=" + source + "]";
+        String header = "### " + name
+                + "  [level=" + level + ", id=" + id
+                + ", callers=" + callerIds
+                + ", source=" + source + "]";
+        sb.append(header).append('\n');
         if (structureSource != null) {
-            sb.append(header).append("  [branch=source]\n");
+            sb.append("#### [branch=source]\n");
             sb.append(StructureNodePrinter.render(structureSource, 0));
         }
         if (structureTarget != null) {
-            sb.append(header).append("  [branch=target]\n");
+            sb.append("#### [branch=target]\n");
             sb.append(StructureNodePrinter.render(structureTarget, 0));
         }
         return sb.toString();
