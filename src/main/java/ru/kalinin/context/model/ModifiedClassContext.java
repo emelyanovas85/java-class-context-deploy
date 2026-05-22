@@ -1,45 +1,22 @@
 package ru.kalinin.context.model;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import io.swagger.v3.oas.annotations.media.Schema;
-
 import java.util.List;
 import java.util.Set;
 
 /**
- * Контекст класса, структура которого изменилась: source и target различаются,
- * либо одна из веток null (файл создан или удалён).
+ * Класс, чья структура изменилась между source и target ветками MR,
+ * либо файл был создан или удалён.
  *
- * @param id               сквозной уникальный идентификатор
- * @param name             qualified name класса
- * @param level            уровень контекста
- * @param callerIds        id классов, которые ссылаются на данный
- * @param structureSource  структура source-ветки (null — файл удалён)
- * @param structureTarget  структура target-ветки (null — файл создан)
+ * <p>{@code structureSource} — структура source-ветки (null, если файл был удалён).<br>
+ * {@code structureTarget} — структура target-ветки (null, если файл был только что создан).
  */
-@JsonInclude(JsonInclude.Include.NON_NULL)
-@Schema(description = "Класс с изменениями: source и target различаются")
 public record ModifiedClassContext(
         int id,
         String name,
         int level,
         Set<Integer> callerIds,
+        String source,
         List<StructureNode> structureSource,
         List<StructureNode> structureTarget
 ) implements ClassContext {
-
-    @Override
-    public String toString() {
-        StringBuilder sb = new StringBuilder();
-        String header = "### " + name + "  [id=" + id + ", level=" + level + ", callers=" + callerIds + "]";
-        if (structureSource != null) {
-            sb.append(header).append("  [source]\n");
-            sb.append(StructureNodePrinter.render(structureSource, 0));
-        }
-        if (structureTarget != null) {
-            sb.append(header).append("  [target]\n");
-            sb.append(StructureNodePrinter.render(structureTarget, 0));
-        }
-        return sb.toString();
-    }
 }

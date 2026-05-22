@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.dependency.DependencyClassNameExtractor;
+import ru.kalinin.context.dependency.DependencyCoordinate;
 import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 import ru.kalinin.context.model.*;
 import ru.kalinin.context.parser.JavaStructureParser;
@@ -123,6 +124,7 @@ public class ContextBuilderService {
                         .map(tgt -> nodeMapper.map(tgt, filePath))
                         .orElse(null);
 
+                String src0 = repoSource(filePath);
                 parsed.forEach(cs -> {
                     if (!processedQNames.contains(cs.qualifiedName())) {
                         int id = idCounter.getAndIncrement();
@@ -131,7 +133,7 @@ public class ContextBuilderService {
                         level0.add(cs);
                         addNestedQNames(cs, processedQNames);
                         allContexts.add(ClassContext.of(
-                                id, Set.of(), cs.qualifiedName(), 0, srcNodes, tgtNodes));
+                                id, Set.of(), cs.qualifiedName(), 0, src0, srcNodes, tgtNodes));
                     }
                 });
             });
@@ -142,7 +144,6 @@ public class ContextBuilderService {
         List<ClassStructure> allParsed = new ArrayList<>(level0);
 
         for (int depth = 1; depth <= request.depth(); depth++) {
-            // Собираем: для каждого referenced type → set id классов, которые на него ссылаются
             Map<String, Set<Integer>> refToCallerIds = collectRefToCallerIds(currentLevel, processedQNames, qNameToId);
             Set<String> referencedTypes = new LinkedHashSet<>(refToCallerIds.keySet());
             referencedTypes.removeAll(processedQNames);
@@ -156,7 +157,6 @@ public class ContextBuilderService {
             for (String qName : referencedTypes) {
                 Set<Integer> callerIds = refToCallerIds.getOrDefault(qName, Set.of());
 
-                // 1. Поиск в репозитории: сначала точный, затем откусывание сегментов
                 Optional<Map.Entry<String, String>> repoSource =
                         findRepoSourceForType(qName, fileIndex,
                                 request.gitlabUrl(), request.token(),
@@ -168,7 +168,6 @@ public class ContextBuilderService {
                     continue;
                 }
 
-                // 2. Точный поиск в dependencySources
                 Path jarPath = dependencySources.get(qName);
                 if (jarPath != null) {
                     addFromJar(jarPath, qName, finalDepth, callerIds, wildcardResolver,
@@ -246,6 +245,30 @@ public class ContextBuilderService {
         }
 
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
+    }
+
+    // -------------------------------------------------------------------------
+    // Source label helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Определяет метку источника по пути файла в репозитории.
+     * Возвращает {@code "test"} для {@code src/test/java/...},
+     * {@code "main"} в остальных случаях.
+     */
+    private static String repoSource(String filePath) {
+        return filePath.startsWith("src/test/") ? "test" : "main";
+    }
+
+    /**
+     * Определяет метку источника по пути к jar на диске.
+     * Использует {@link DependencyCoordinate#fromLocalFileName} для парсинга имени файла.
+     * Если формат не распознан — возвращает имя файла как есть.
+     */
+    private static String jarSource(Path jarPath) {
+        String fileName = jarPath.getFileName().toString();
+        DependencyCoordinate coord = DependencyCoordinate.fromLocalFileName(fileName);
+        return coord != null ? coord.toString() : fileName;
     }
 
     // -------------------------------------------------------------------------
@@ -344,9 +367,6 @@ public class ContextBuilderService {
     // collectRawRefs / collectAndResolveRefs / collectRefToCallerIds
     // -------------------------------------------------------------------------
 
-    /**
-     * Собирает сырые {@link UnresolvedTypeRef} без резолвинга для заданных классов.
-     */
     private Set<UnresolvedTypeRef> collectRawRefs(List<ClassStructure> classes) {
         Set<UnresolvedTypeRef> refs = new LinkedHashSet<>();
         for (ClassStructure cs : classes) {
@@ -355,10 +375,6 @@ public class ContextBuilderService {
         return refs;
     }
 
-    /**
-     * Собирает все типы-зависимости со всех классов и пробует
-     * резолвить нерезолвленные (simple name) через уже известные {@code knownQNames}.
-     */
     private Set<String> collectAndResolveRefs(List<ClassStructure> classes,
                                                Set<String> knownQNames) {
         Set<String> resolved = new LinkedHashSet<>();
@@ -368,11 +384,6 @@ public class ContextBuilderService {
         return resolved;
     }
 
-    /**
-     * Для каждого referenced type строит mapping: resolvedQName → Set&lt;callerId&gt;.
-     * callerId — id ClassContext того класса, который ссылается на данный тип.
-     * Классы, для которых id ещё не назначен (нет в qNameToId), пропускаются как caller.
-     */
     private Map<String, Set<Integer>> collectRefToCallerIds(
             List<ClassStructure> classes,
             Set<String> knownQNames,
@@ -392,12 +403,6 @@ public class ContextBuilderService {
         return result;
     }
 
-    /**
-     * Пробует резолвить {@link UnresolvedTypeRef} через {@code knownQNames}.
-     * Если имя уже qualified (содержит точку) — возвращает как есть.
-     * Если simple name — ищет в knownQNames по правилу:
-     * {@code qName.endsWith("." + simpleName) && wildcardPackages.contains(pkg(qName))}.
-     */
     private String resolveRef(UnresolvedTypeRef ref, Set<String> knownQNames) {
         if (!ref.isUnresolved()) return ref.name();
 
@@ -442,6 +447,7 @@ public class ContextBuilderService {
         List<ClassStructure> parsed =
                 structureParser.parse(content, filePath, depth, wildcardResolver);
         List<StructureNode> nodes = nodeMapper.map(content, filePath);
+        String src = repoSource(filePath);
 
         parsed.forEach(cs -> {
             if (!processedQNames.contains(cs.qualifiedName())) {
@@ -450,7 +456,7 @@ public class ContextBuilderService {
                 qNameToId.put(cs.qualifiedName(), id);
                 nextLevel.add(cs);
                 addNestedQNames(cs, processedQNames);
-                allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, nodes, nodes));
+                allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, src, nodes, nodes));
             }
         });
     }
@@ -461,6 +467,7 @@ public class ContextBuilderService {
                             List<ClassStructure> nextLevel, Set<String> processedQNames,
                             Map<String, Integer> qNameToId, AtomicInteger idCounter,
                             List<ClassContext> allContexts) {
+        String src = jarSource(jarPath);
         classNameExtractor.extractSourceFile(jarPath, qName).ifPresent(content -> {
             String syntheticPath = qName.replace('.', '/') + ".java";
             List<ClassStructure> parsed =
@@ -474,10 +481,10 @@ public class ContextBuilderService {
                     qNameToId.put(cs.qualifiedName(), id);
                     nextLevel.add(cs);
                     addNestedQNames(cs, processedQNames);
-                    allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, nodes, nodes));
+                    allContexts.add(ClassContext.of(id, callerIds, cs.qualifiedName(), depth, src, nodes, nodes));
                 }
             });
-            log.debug("Resolved '{}' from sources.jar on disk", qName);
+            log.debug("Resolved '{}' from sources.jar on disk (source: {})", qName, src);
         });
     }
 

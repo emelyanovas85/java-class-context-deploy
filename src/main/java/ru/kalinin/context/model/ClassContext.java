@@ -19,6 +19,15 @@ import java.util.Set;
  * id классов, которые непосредственно ссылаются на данный. Классы уровня 0
  * имеют пустой {@code callerIds}.
  *
+ * <h3>Поле source</h3>
+ * <p>Описывает, откуда был получен класс:
+ * <ul>
+ *   <li>{@code "main"} — из {@code src/main/java/} репозитория</li>
+ *   <li>{@code "test"} — из {@code src/test/java/} репозитория</li>
+ *   <li>{@code "groupId:artifactId:version"} — из sources.jar внешней зависимости,
+ *       например {@code "org.aspectj:aspectjweaver:1.9.22"}</li>
+ * </ul>
+ *
  * <p>Используйте фабрику {@link #of} вместо прямого создания.
  */
 public sealed interface ClassContext
@@ -40,6 +49,13 @@ public sealed interface ClassContext
     Set<Integer> callerIds();
 
     /**
+     * Источник класса:
+     * {@code "main"}, {@code "test"} или
+     * {@code "groupId:artifactId:version"} для внешних зависимостей.
+     */
+    String source();
+
+    /**
      * Фабрика: сравнивает структуры и возвращает подходящий подтип.
      *
      * <ul>
@@ -51,18 +67,20 @@ public sealed interface ClassContext
      * @param callerIds        id классов-потребителей
      * @param name             qualified name
      * @param level            уровень контекста
+     * @param source           источник: "main", "test" или "groupId:artifactId:version"
      * @param structureSource  структура source-ветки (null — файл удалён)
      * @param structureTarget  структура target-ветки (null — файл создан)
      */
     static ClassContext of(int id, Set<Integer> callerIds,
                            String name, int level,
+                           String source,
                            List<StructureNode> structureSource,
                            List<StructureNode> structureTarget) {
         if (structureSource != null
                 && structureTarget != null
                 && Objects.equals(structureSource, structureTarget)) {
-            return new UnchangedClassContext(id, name, level, callerIds, structureSource);
+            return new UnchangedClassContext(id, name, level, callerIds, source, structureSource);
         }
-        return new ModifiedClassContext(id, name, level, callerIds, structureSource, structureTarget);
+        return new ModifiedClassContext(id, name, level, callerIds, source, structureSource, structureTarget);
     }
 }
