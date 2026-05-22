@@ -9,19 +9,20 @@ import java.util.concurrent.Executors;
 /**
  * Конфигурация пула потоков для параллельных I/O-операций.
  *
- * <p>Используются виртуальные потоки Java 21 (Project Loom):
- * идеально подходят для I/O-bound задач (HTTP к GitLab/Artifactory),
- * не блокируют carrier threads и не требуют ручного sizing пула.
+ * <p>Используется fixed thread pool с размером, ориентированным на I/O-bound задачи
+ * (HTTP к GitLab/Artifactory). Размер пула = 2 × число процессоров — стандартная
+ * эвристика для задач с блокирующим I/O.
  */
 @Configuration
 public class AsyncConfig {
 
     /**
-     * Executor на виртуальных потоках для параллельного чтения файлов из GitLab.
+     * Executor для параллельного чтения файлов из GitLab.
      * Используется в {@link ru.kalinin.context.service.ContextBuilderService}.
      */
     @Bean(name = "ioExecutor", destroyMethod = "shutdown")
     public ExecutorService ioExecutor() {
-        return Executors.newVirtualThreadPerTaskExecutor();
+        int threads = Runtime.getRuntime().availableProcessors() * 2;
+        return Executors.newFixedThreadPool(threads);
     }
 }
