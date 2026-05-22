@@ -1,5 +1,7 @@
 package ru.kalinin.context.dependency;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -17,12 +19,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Скачивает {@code *-sources.jar} из Artifactory и сохраняет их на диск.
+ * Скачивает {@code *-sources.jar} и {@code *.module} из Artifactory и сохраняет их на диск.
  *
  * <h3>Кэширование на диске</h3>
- * <p>Каждый скачанный jar сохраняется в директорию {@code artifactsDir}
- * (по умолчанию {@code /artifacts}) под имене
- * {@code groupId__artifactId__version-sources.jar}.
+ * <p>Каждый скачанный файл (jar или .module) сохраняется в директорию {@code artifactsDir}
+ * (по умолчанию {@code /artifacts}).
  * Двойное подчёркивание ({@code __}) как разделитель устраняет неоднозначность
  * при парсинге, возникающую когда groupId, artifactId или version сами
  * содержат дефисы.
@@ -52,15 +53,18 @@ public class ArtifactorySourcesLoader {
             Pattern.CASE_INSENSITIVE
     );
 
-    /** Директория для хранения скачанных jar-файлов. */
+    /** Директория для хранения скачанных файлов (jar и .module). */
     private final Path artifactsDir;
 
     private final RestClient restClient;
+    private final ObjectMapper objectMapper;
 
     public ArtifactorySourcesLoader(
             RestClient.Builder restClientBuilder,
+            ObjectMapper objectMapper,
             @Value("${app.artifacts-dir:/artifacts}") String artifactsDirPath) {
         this.restClient = restClientBuilder.build();
+        this.objectMapper = objectMapper;
         this.artifactsDir = Path.of(artifactsDirPath);
         try {
             Files.createDirectories(artifactsDir);
@@ -126,13 +130,116 @@ public class ArtifactorySourcesLoader {
         }
 
         String relativePath = dep.mavenRelativePath() + dep.sourcesJarName();
+        return downloadToFile(artifactoryRepoUrls, relativePath, localPath,
+                "sources.jar", dep.toString())
+                .map(p -> p);
+    }
 
-        for (String repoUrl : artifactoryRepoUrls) {
+    /**
+     * Возвращает путь к локально сохранённому {@code .module} файлу для указанной зависимости.
+     *
+     * <p>Кэшируется на диск аналогично sources.jar.
+     *
+     * @param artifactoryRepoUrls список repo URL из {@link #detectArtifactoryUrls}
+     * @param dep                 координаты зависимости (с явной версией)
+     * @return путь к .module-файлу на диске или {@code Optional.empty()} если не найдено
+     */
+    public Optional<Path> resolveModuleFile(List<String> artifactoryRepoUrls,
+                                            DependencyCoordinate dep) {
+        if (!dep.hasVersion()) {
+            log.debug("Skipping BOM-managed dependency without version (module): {}", dep);
+            return Optional.empty();
+        }
+
+        Path localPath = artifactsDir.resolve(dep.localModuleFileName());
+
+        if (Files.exists(localPath)) {
+            log.debug(".module cache hit (disk): {}", localPath);
+            return Optional.of(localPath);
+        }
+
+        String relativePath = dep.mavenRelativePath() + dep.moduleFileName();
+        return downloadToFile(artifactoryRepoUrls, relativePath, localPath,
+                ".module", dep.toString());
+    }
+
+    /**
+     * Парсит содержимое Gradle Module Metadata ({@code .module}) файла
+     * и выводит список api-зависимостей из варианта {@code apiElements}.
+     *
+     * <p>Структура .module:
+     * <pre>
+     * {
+     *   "variants": [
+     *     {
+     *       "name": "apiElements",
+     *       "dependencies": [
+     *         { "group": "com.example", "module": "some-lib", "version": { "requires": "1.2.3" } }
+     *       ]
+     *     }
+     *   ]
+     * }
+     * </pre>
+     *
+     * @param moduleFilePath путь к скачанному .module-файлу
+     * @param parentDep      родительская зависимость (для логов)
+     * @return список api-зависимостей, может быть пустым
+     */
+    public List<DependencyCoordinate> parseApiDependencies(Path moduleFilePath,
+                                                           DependencyCoordinate parentDep) {
+        List<DependencyCoordinate> result = new ArrayList<>();
+        try {
+            JsonNode root = objectMapper.readTree(moduleFilePath.toFile());
+            JsonNode variants = root.path("variants");
+            for (JsonNode variant : variants) {
+                if (!"apiElements".equals(variant.path("name").asText())) {
+                    continue;
+                }
+                JsonNode dependencies = variant.path("dependencies");
+                for (JsonNode dep : dependencies) {
+                    String group   = dep.path("group").asText(null);
+                    String module  = dep.path("module").asText(null);
+                    // version может быть объектом {"requires": "x"} или строкой
+                    JsonNode versionNode = dep.path("version");
+                    String version = null;
+                    if (versionNode.isTextual()) {
+                        version = versionNode.asText(null);
+                    } else if (!versionNode.isMissingNode()) {
+                        version = versionNode.path("requires").asText(null);
+                        if (version == null || version.isBlank()) {
+                            version = versionNode.path("prefers").asText(null);
+                        }
+                    }
+                    if (group != null && module != null) {
+                        result.add(new DependencyCoordinate(group, module, version));
+                        log.debug("Found api dep in .module of {}: {}:{}", parentDep, group, module);
+                    }
+                }
+                break; // apiElements нашли, дальше не идём
+            }
+        } catch (IOException e) {
+            log.warn("Failed to parse .module file {}: {}", moduleFilePath, e.getMessage());
+        }
+        log.debug("Parsed {} api deps from .module of {}", result.size(), parentDep);
+        return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Скачивает файл по перебору repoUrls и сохраняет на диск.
+     * Возвращает путь при успехе или {@code Optional.empty()}.
+     */
+    private Optional<Path> downloadToFile(List<String> repoUrls, String relativePath,
+                                          Path localPath, String fileType, String depLabel) {
+        for (String repoUrl : repoUrls) {
             String base = repoUrl.endsWith("/")
                     ? repoUrl.substring(0, repoUrl.length() - 1)
                     : repoUrl;
             String url = base + '/' + relativePath;
-            log.debug("Trying sources.jar: {}", url);
+            log.debug("Trying {}: {}", fileType, url);
 
             try {
                 byte[] bytes = restClient.get()
@@ -142,24 +249,19 @@ public class ArtifactorySourcesLoader {
                 if (bytes != null && bytes.length > 0) {
                     Files.write(localPath, bytes,
                             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                    log.info("Downloaded and saved sources.jar ({} bytes) \u2192 {}: {}",
-                            bytes.length, localPath, dep);
+                    log.info("Downloaded and saved {} ({} bytes) \u2192 {}: {}",
+                            fileType, bytes.length, localPath, depLabel);
                     return Optional.of(localPath);
                 }
             } catch (RestClientException e) {
-                log.debug("Not found in {}: {} \u2014 {}", repoUrl, dep, e.getMessage());
+                log.debug("Not found in {}: {} \u2014 {}", repoUrl, depLabel, e.getMessage());
             } catch (IOException e) {
-                log.warn("Failed to save sources.jar for {} to {}: {}", dep, localPath, e.getMessage());
+                log.warn("Failed to save {} for {} to {}: {}", fileType, depLabel, localPath, e.getMessage());
             }
         }
-
-        log.debug("sources.jar not found in any repo for: {}", dep);
+        log.debug("{} not found in any repo for: {}", fileType, depLabel);
         return Optional.empty();
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Удаляет замыкающие нежелательные символы с конца URL:
