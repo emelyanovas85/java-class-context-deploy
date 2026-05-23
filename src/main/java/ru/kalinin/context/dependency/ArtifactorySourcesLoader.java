@@ -128,8 +128,7 @@ public class ArtifactorySourcesLoader {
     /**
      * Парсит {@code .module}-файл и возвращает api-зависимости из варианта {@code apiElements}.
      *
-     * <p>Если версия зависимости является динамической (contains {@code +} or Maven range),
-     * резолвит её через {@code maven-metadata.xml}.
+     * <p>Если версия динамическая, резолвит её через {@code maven-metadata.xml}.
      *
      * @param moduleFilePath      путь к скачанному {@code .module}-файлу
      * @param parentDep           родительская зависимость (для логов)
@@ -158,7 +157,7 @@ public class ArtifactorySourcesLoader {
                     log.debug("Found api dep in .module of {}: {}:{}:{}",
                             parentDep, group, module, version);
                 }
-                break; // apiElements нашли, дальше не идём
+                break;
             }
         } catch (IOException e) {
             log.warn("Failed to parse .module file {}: {}", moduleFilePath, e.getMessage());
@@ -169,7 +168,6 @@ public class ArtifactorySourcesLoader {
 
     /**
      * @deprecated Используйте {@link #parseApiDependencies(Path, DependencyCoordinate, List)}.
-     * Оставлен для обратной совместимости в тестах.
      */
     @Deprecated
     public List<DependencyCoordinate> parseApiDependencies(Path moduleFilePath,
@@ -179,10 +177,6 @@ public class ArtifactorySourcesLoader {
 
     // ── Динамические версии ─────────────────────────────────────────────
 
-    /**
-     * Если версия динамическая — резолвит её через {@code maven-metadata.xml}.
-     * Если статическая — возвращает как есть.
-     */
     private String resolveVersionIfDynamic(String version, String group, String module,
                                            List<String> repoUrls) {
         if (version == null || !isDynamicVersion(version)) return version;
@@ -204,10 +198,6 @@ public class ArtifactorySourcesLoader {
         return version;
     }
 
-    /**
-     * Возвращает {@code true} если версия динамическая:
-     * содержит {@code +} или есть Maven range-запись (начинается на {@code [} или {@code (}).
-     */
     static boolean isDynamicVersion(String version) {
         if (version == null) return false;
         String trimmed = version.trim();
@@ -216,10 +206,6 @@ public class ArtifactorySourcesLoader {
                 || trimmed.startsWith("(");
     }
 
-    /**
-     * Скачивает / возвращает с диска содержимое {@code maven-metadata.xml}.
-     * Кэш-файл: {@code metadata__<group>__<module>.xml}
-     */
     private Optional<String> fetchMavenMetadata(String group, String module,
                                                  List<String> repoUrls) {
         String safeName = group.replace('.', '_') + "__" + module;
@@ -234,13 +220,11 @@ public class ArtifactorySourcesLoader {
             }
         }
 
-        // Построить путь: group/module/maven-metadata.xml
         String relPath = group.replace('.', '/') + '/' + module + "/maven-metadata.xml";
-
         for (String repoUrl : repoUrls) {
             String base = repoUrl.endsWith("/")
                     ? repoUrl.substring(0, repoUrl.length() - 1) : repoUrl;
-            String url  = base + '/' + relPath;
+            String url = base + '/' + relPath;
             log.debug("Trying maven-metadata.xml: {}", url);
             try {
                 String xml = restClient.get().uri(url).retrieve().body(String.class);
@@ -260,19 +244,8 @@ public class ArtifactorySourcesLoader {
         return Optional.empty();
     }
 
-    /**
-     * Извлекает конкретную версию из {@code maven-metadata.xml}:
-     * <ul>
-     *   <li>Для {@code +}-версий (напр. {@code 2.+}): выбирает {@code <release>},
-     *       если он начинается с нужного префикса; иначе — максимальную
-     *       версию с нужным префиксом.</li>
-     *   <li>Для range-версий (напр. {@code [2.1.0,)}): выбирает максимальную
-     *       версию из {@code <versions>}, удовлетворяющую lower bound.</li>
-     * </ul>
-     */
     private Optional<String> resolveFromMetadata(String xml, String versionExpr,
                                                   String group, String module) {
-        // Извлечаем все <version> теги и <release>
         List<String> versions = extractXmlElements(xml, "version");
         String release        = extractXmlElement(xml, "release");
         String latest         = extractXmlElement(xml, "latest");
@@ -284,94 +257,81 @@ public class ArtifactorySourcesLoader {
 
         String trimmed = versionExpr.trim();
 
-        // ── Обработка версий с "+" ─────────────────────────────────
+        // ── "+"-версии ──────────────────────────────────────────────
         if (trimmed.contains("+")) {
             String prefix = trimmed.substring(0, trimmed.indexOf('+')).trim();
-            // Без префикса ("+" или "latest.release") — берём release / latest
             if (prefix.isEmpty() || prefix.equals("latest")) {
                 return Optional.ofNullable(release != null ? release : latest);
             }
-            // Есть префикс (напр. "2.") — предпочитаем release, если он подходит
             if (release != null && release.startsWith(prefix)) {
                 return Optional.of(release);
             }
-            // Иначе — максимальная версия с данным префиксом
+            // Максимальная версия с данным префиксом — явный Comparator<List<Integer>>
             return versions.stream()
                     .filter(v -> v.startsWith(prefix))
-                    .max(Comparator.comparing(ArtifactorySourcesLoader::parseVersion));
+                    .max(Comparator.comparing(
+                            ArtifactorySourcesLoader::parseVersion,
+                            (a, b) -> compareVersionParts(a, b)));
         }
 
-        // ── Maven range ───────────────────────────────────────────────
+        // ── Maven range ──────────────────────────────────────────────
         if (trimmed.startsWith("[") || trimmed.startsWith("(")) {
             VersionRange range = VersionRange.parse(trimmed);
             return versions.stream()
                     .filter(range::includes)
-                    .max(Comparator.comparing(ArtifactorySourcesLoader::parseVersion));
+                    .max(Comparator.comparing(
+                            ArtifactorySourcesLoader::parseVersion,
+                            (a, b) -> compareVersionParts(a, b)));
         }
 
         return Optional.empty();
     }
 
-    // ── Вспомогательные классы ───────────────────────────────────────────
+    // ── VersionRange record ─────────────────────────────────────────────
 
-    /**
-     * Разбирает Maven version range ({@code [a,b]}, {@code (a,b)}, {@code [a,)}, ...) и
-     * проверяет, удовлетворяет ли конкретная версия диапазону.
-     * Поддерживается одинарный диапазон с открытым / закрытым левым/правым краем.
-     * Пустые края (напр. {@code [2.1.0,)}) означают безграничные bound.
-     */
     record VersionRange(String lower, boolean lowerInclusive,
                         String upper, boolean upperInclusive) {
 
         static VersionRange parse(String expr) {
-            String s = expr.trim();
+            String s    = expr.trim();
             boolean loInc = s.startsWith("[");
             boolean hiInc = s.endsWith("]");
-            String inner = s.substring(1, s.length() - 1);
-            int comma = inner.indexOf(',');
+            String inner  = s.substring(1, s.length() - 1);
+            int comma      = inner.indexOf(',');
             String lo = comma >= 0 ? inner.substring(0, comma).trim() : inner.trim();
             String hi = comma >= 0 ? inner.substring(comma + 1).trim() : "";
             return new VersionRange(
-                    lo.isEmpty()  ? null : lo,
-                    loInc,
-                    hi.isEmpty()  ? null : hi,
-                    hiInc);
+                    lo.isEmpty() ? null : lo, loInc,
+                    hi.isEmpty() ? null : hi, hiInc);
         }
 
         boolean includes(String version) {
             List<Integer> v = parseVersion(version);
             if (lower != null) {
-                List<Integer> lo = parseVersion(lower);
-                int cmp = compareVersionParts(v, lo);
+                int cmp = compareVersionParts(v, parseVersion(lower));
                 if (lowerInclusive ? cmp < 0 : cmp <= 0) return false;
             }
             if (upper != null) {
-                List<Integer> hi = parseVersion(upper);
-                int cmp = compareVersionParts(v, hi);
+                int cmp = compareVersionParts(v, parseVersion(upper));
                 if (upperInclusive ? cmp > 0 : cmp >= 0) return false;
             }
             return true;
         }
     }
 
-    /**
-     * Разбирает версию в список числовых сегментов (семантическое сравнение).
-     * Нечисловые сегменты (напр. {@code -SNAPSHOT}) трактуются как 0.
-     */
+    // ── Version helpers ────────────────────────────────────────────────
+
     static List<Integer> parseVersion(String version) {
         if (version == null) return List.of();
         List<Integer> parts = new ArrayList<>();
         for (String seg : version.split("[.\\-]")) {
-            try {
-                parts.add(Integer.parseInt(seg));
-            } catch (NumberFormatException ignored) {
-                parts.add(0);
-            }
+            try { parts.add(Integer.parseInt(seg)); }
+            catch (NumberFormatException ignored) { parts.add(0); }
         }
         return parts;
     }
 
-    private static int compareVersionParts(List<Integer> a, List<Integer> b) {
+    static int compareVersionParts(List<Integer> a, List<Integer> b) {
         int len = Math.max(a.size(), b.size());
         for (int i = 0; i < len; i++) {
             int ai = i < a.size() ? a.get(i) : 0;
@@ -381,9 +341,8 @@ public class ArtifactorySourcesLoader {
         return 0;
     }
 
-    // ── XML helpers (без DOM, чтобы не тянуть javax.xml) ────────────────
+    // ── XML helpers ───────────────────────────────────────────────────
 
-    /** Возвращает содержимое первого вхождения тега {@code <tag>...text...</tag>}. */
     private static String extractXmlElement(String xml, String tag) {
         int open  = xml.indexOf('<' + tag + '>');
         int close = xml.indexOf("</" + tag + '>');
@@ -391,7 +350,6 @@ public class ArtifactorySourcesLoader {
         return xml.substring(open + tag.length() + 2, close).trim();
     }
 
-    /** Возвращает содержимое всех вхождений тега {@code <tag>...text...</tag>}. */
     private static List<String> extractXmlElements(String xml, String tag) {
         List<String> result = new ArrayList<>();
         String open  = '<' + tag + '>';
@@ -407,18 +365,15 @@ public class ArtifactorySourcesLoader {
         return result;
     }
 
-    // ── Сердцевина parseApiDependencies: извлечение строки version из JSON ───────
+    // ── JSON / URL helpers ─────────────────────────────────────────────
 
     private static String extractVersionString(JsonNode versionNode) {
         if (versionNode == null || versionNode.isMissingNode()) return null;
         if (versionNode.isTextual()) return versionNode.asText(null);
-        // {"requires": "x"} или {"prefers": "x"}
         String v = versionNode.path("requires").asText(null);
         if (v == null || v.isBlank()) v = versionNode.path("prefers").asText(null);
         return (v != null && v.isBlank()) ? null : v;
     }
-
-    // ── Остальные helpers ────────────────────────────────────────────────
 
     private Optional<Path> downloadToFile(List<String> repoUrls, String relativePath,
                                           Path localPath, String fileType, String depLabel) {
