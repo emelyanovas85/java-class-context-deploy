@@ -211,7 +211,7 @@ public class DependencyContextService {
         // попытаться найти .module и раскрыть api-зависимости
         List<DependencyCoordinate> apiDeps = new ArrayList<>();
         sourcesLoader.resolveModuleFile(artifactoryUrls, dep).ifPresent(moduleFile -> {
-            List<DependencyCoordinate> parsed = sourcesLoader.parseApiDependencies(moduleFile, dep);
+            List<DependencyCoordinate> parsed = sourcesLoader.parseApiDependencies(moduleFile, dep, artifactoryUrls);
             apiDeps.addAll(parsed);
         });
 

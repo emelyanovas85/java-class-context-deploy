@@ -166,15 +166,6 @@ public class ArtifactorySourcesLoader {
         return result;
     }
 
-    /**
-     * @deprecated Используйте {@link #parseApiDependencies(Path, DependencyCoordinate, List)}.
-     */
-    @Deprecated
-    public List<DependencyCoordinate> parseApiDependencies(Path moduleFilePath,
-                                                           DependencyCoordinate parentDep) {
-        return parseApiDependencies(moduleFilePath, parentDep, List.of());
-    }
-
     // ── Динамические версии ─────────────────────────────────────────────
 
     private String resolveVersionIfDynamic(String version, String group, String module,
