@@ -19,7 +19,7 @@ public record ContextRequest(
         @NotBlank(message = "projectId must not be blank")
         String projectId,
 
-        @Schema(description = "Personal или Project Access Token", example = "glpat-xxxxxxxxxxxx")
+        @Schema(description = "Personal или Project Access Token", example = "glpat-**MmA5L59_C_JYzqXpY23a**")
         @NotBlank(message = "token must not be blank")
         String token,
 

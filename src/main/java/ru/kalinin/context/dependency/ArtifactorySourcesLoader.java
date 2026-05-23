@@ -62,7 +62,7 @@ public class ArtifactorySourcesLoader {
     public ArtifactorySourcesLoader(
             RestClient.Builder restClientBuilder,
             ObjectMapper objectMapper,
-            @Value("${app.artifacts-dir:/artifacts}") String artifactsDirPath) {
+            @Value("${app.artifacts-dir:artifacts}") String artifactsDirPath) {
         this.restClient = restClientBuilder.build();
         this.objectMapper = objectMapper;
         this.artifactsDir = Path.of(artifactsDirPath);
