@@ -2,41 +2,70 @@ package ru.kalinin.context.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import ru.kalinin.context.dependency.*;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 /**
  * Оркестрирует этап сбора контекста зависимостей.
  *
- * <p>Алгоритм:
+ * <h3>Алгоритм</h3>
  * <ol>
  *   <li>Найти файлы сборки (*.gradle / pom.xml) через уже готовый fileIndex.</li>
  *   <li>Прочитать их содержимое.</li>
  *   <li>Найти все Artifactory repo URL из Gradle-файлов.</li>
  *   <li>Извлечь зависимости с явными версиями через подходящий {@link DependencyExtractor}.</li>
- *   <li>Для каждой зависимости получить путь к sources.jar на диске
- *       (скачать если нет) и проиндексировать классы.</li>
- *   <li>Рекурсивно обработать транзитивные api-зависимости:
- *       для каждой зависимости ищем .module файл в Artifactory,
- *       извлекаем блок apiElements и добавляем новые координаты в очередь.
- *       Используется {@code visited} для защиты от циклов.</li>
+ *   <li>Обойти граф зависимостей волновым BFS: каждая волна (фронт не обработанных координат)
+ *       обрабатывается <b>параллельно</b> через {@code ioExecutor}:
+ *       <ul>
+ *         <li>скачать / взять с диска {@code sources.jar} → проиндексировать классы;</li>
+ *         <li>скачать / взять с диска {@code .module} → извлечь api-зависимости.</li>
+ *       </ul>
+ *       Результаты волны собираются, из них формируется следующая волна.
+ *       {@code visited} защищает от циклов.</li>
  * </ol>
  *
  * <p>Результат — {@code Map<String, Path>}: qualified name класса → путь к jar на диске.
  * Байты jar в памяти не удерживаются.
+ *
+ * <h3>Thread safety</h3>
+ * <p>{@link ArtifactorySourcesLoader} и {@link DependencyClassNameExtractor} должны быть
+ * thread-safe (файловый кэш на диске, синхронизированный через атомарные операции ФС или
+ * аналогичный механизм — см. реализации).
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class DependencyContextService {
 
     private final GitLabService gitLabService;
     private final List<DependencyExtractor> extractors;
     private final ArtifactorySourcesLoader sourcesLoader;
     private final DependencyClassNameExtractor classNameExtractor;
+    private final ExecutorService ioExecutor;
+
+    public DependencyContextService(GitLabService gitLabService,
+                                    List<DependencyExtractor> extractors,
+                                    ArtifactorySourcesLoader sourcesLoader,
+                                    DependencyClassNameExtractor classNameExtractor,
+                                    @Qualifier("ioExecutor") ExecutorService ioExecutor) {
+        this.gitLabService = gitLabService;
+        this.extractors = extractors;
+        this.sourcesLoader = sourcesLoader;
+        this.classNameExtractor = classNameExtractor;
+        this.ioExecutor = ioExecutor;
+    }
+
+    // ── вспомогательный record: результат обработки одной зависимости ────────
+
+    private record DepResult(
+            Map<String, Path> classMap,        // qName → jarPath
+            List<DependencyCoordinate> apiDeps // транзитивные api-зависимости
+    ) {}
 
     /**
      * Собирает карту «qualified name → путь к jar на диске» для всех классов из зависимостей,
@@ -91,7 +120,6 @@ public class DependencyContextService {
             String fileName = entry.getKey().contains("/")
                     ? entry.getKey().substring(entry.getKey().lastIndexOf('/') + 1)
                     : entry.getKey();
-            String content = entry.getValue();
 
             extractors.stream()
                     .filter(e -> e.supports(fileName))
@@ -99,7 +127,7 @@ public class DependencyContextService {
                     .ifPresentOrElse(
                             extractor -> {
                                 try {
-                                    List<DependencyCoordinate> deps = extractor.extract(content);
+                                    List<DependencyCoordinate> deps = extractor.extract(entry.getValue());
                                     directDeps.addAll(deps);
                                     log.debug("Extracted {} deps from {}", deps.size(), entry.getKey());
                                 } catch (UnsupportedOperationException ex) {
@@ -116,40 +144,77 @@ public class DependencyContextService {
         }
         log.info("Direct versioned dependencies found: {}", directDeps.size());
 
-        // 5. Рекурсивно обходим все зависимости (прямые + api-транзитивные)
-        Map<String, Path> dependencySources = new HashMap<>();
-        // Ключ visited: "groupId:artifactId:version", чтобы не обрабатывать одну зависимость дважды
-        Set<String> visited = new HashSet<>();
-        Deque<DependencyCoordinate> queue = new ArrayDeque<>(directDeps);
+        // 5. Волновой BFS: каждая волна обрабатывается параллельно ─────────────
+        //
+        //  wave 0: directDeps  ──▶  [jar+module каждый параллельно]
+        //                           ↓ api-deps из .module → wave 1
+        //  wave 1: apiDeps     ──▶  [jar+module каждый параллельно]
+        //                           ↓ api-deps → wave 2  ...  до опустошения
+        //
+        Map<String, Path> dependencySources = new ConcurrentHashMap<>();
+        Set<String> visited = ConcurrentHashMap.newKeySet();
 
-        while (!queue.isEmpty()) {
-            DependencyCoordinate dep = queue.poll();
-            String depKey = dep.toString();
-            if (!visited.add(depKey)) {
-                continue; // уже обработано
-            }
+        List<DependencyCoordinate> currentWave = directDeps.stream()
+                .filter(d -> visited.add(d.toString()))
+                .toList();
 
-            // скачать sources.jar и проиндексировать классы
-            sourcesLoader.resolveSourcesJar(artifactoryUrls, dep).ifPresent(jarPath -> {
-                Set<String> classNames = classNameExtractor.extractClassNames(jarPath, depKey);
-                classNames.forEach(qName -> dependencySources.put(qName, jarPath));
-                log.debug("Indexed {} classes from {}", classNames.size(), dep);
-            });
+        while (!currentWave.isEmpty()) {
+            log.debug("BFS wave: {} deps to process in parallel", currentWave.size());
 
-            // попытаться найти .module и раскрыть api-зависимости
-            sourcesLoader.resolveModuleFile(artifactoryUrls, dep).ifPresent(moduleFile -> {
-                List<DependencyCoordinate> apiDeps =
-                        sourcesLoader.parseApiDependencies(moduleFile, dep);
-                for (DependencyCoordinate apiDep : apiDeps) {
-                    if (!visited.contains(apiDep.toString())) {
-                        log.debug("Queuing transitive api dep from {}: {}", dep, apiDep);
-                        queue.add(apiDep);
+            // Запускаем все зависимости волны параллельно
+            List<CompletableFuture<DepResult>> futures = currentWave.stream()
+                    .map(dep -> CompletableFuture.supplyAsync(
+                            () -> processDep(dep, artifactoryUrls), ioExecutor))
+                    .toList();
+
+            // Собираем результаты и формируем следующую волну
+            List<DependencyCoordinate> nextWave = new ArrayList<>();
+            for (CompletableFuture<DepResult> future : futures) {
+                DepResult result;
+                try {
+                    result = future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while downloading dependency", e);
+                } catch (ExecutionException e) {
+                    log.warn("Failed to process dependency", e.getCause());
+                    continue;
+                }
+                dependencySources.putAll(result.classMap());
+                for (DependencyCoordinate apiDep : result.apiDeps()) {
+                    if (visited.add(apiDep.toString())) {
+                        nextWave.add(apiDep);
                     }
                 }
-            });
+            }
+
+            currentWave = nextWave;
         }
 
         log.info("Total dependency classes indexed (incl. transitive api): {}", dependencySources.size());
         return Collections.unmodifiableMap(dependencySources);
+    }
+
+    // ── обработка одной зависимости (вызывается из пула потоков) ─────────────
+
+    private DepResult processDep(DependencyCoordinate dep, List<String> artifactoryUrls) {
+        String depKey = dep.toString();
+        Map<String, Path> classMap = new HashMap<>();
+
+        // скачать sources.jar и проиндексировать классы
+        sourcesLoader.resolveSourcesJar(artifactoryUrls, dep).ifPresent(jarPath -> {
+            Set<String> classNames = classNameExtractor.extractClassNames(jarPath, depKey);
+            classNames.forEach(qName -> classMap.put(qName, jarPath));
+            log.debug("Indexed {} classes from {}", classNames.size(), dep);
+        });
+
+        // попытаться найти .module и раскрыть api-зависимости
+        List<DependencyCoordinate> apiDeps = new ArrayList<>();
+        sourcesLoader.resolveModuleFile(artifactoryUrls, dep).ifPresent(moduleFile -> {
+            List<DependencyCoordinate> parsed = sourcesLoader.parseApiDependencies(moduleFile, dep);
+            apiDeps.addAll(parsed);
+        });
+
+        return new DepResult(classMap, apiDeps);
     }
 }
