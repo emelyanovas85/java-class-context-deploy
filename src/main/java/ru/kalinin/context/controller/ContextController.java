@@ -97,10 +97,9 @@ public class ContextController {
                     content = @Content(schema = @Schema()))
     })
     @PostMapping("/source-lines/gitlab")
-    public ResponseEntity<SourceLinesResponse> getGitLabLines(
-            @Valid @RequestBody GitLabLinesRequest request) {
-        log.info("Fetching GitLab source lines: project='{}', ref='{}', files={}",
-                request.projectId(), request.ref(), request.files().size());
+    public ResponseEntity<SourceLinesResponse> getGitLabLines(@Valid @RequestBody GitLabLinesRequest request) {
+        log.info("Fetching GitLab source lines: project='{}', ref='{}', classes={}",
+                request.projectId(), request.ref(), request.classes().size());
         return ResponseEntity.ok(sourceLinesService.fetchFromGitLab(request));
     }
 
@@ -135,8 +134,7 @@ public class ContextController {
                     content = @Content(schema = @Schema()))
     })
     @PostMapping("/source-lines/jar")
-    public ResponseEntity<SourceLinesResponse> getJarLines(
-            @Valid @RequestBody JarLinesRequest request) {
+    public ResponseEntity<SourceLinesResponse> getJarLines(@Valid @RequestBody JarLinesRequest request) {
         log.info("Fetching jar source lines: source='{}', classes={}",
                 request.source(), request.classes().size());
         return ResponseEntity.ok(sourceLinesService.fetchFromJar(request));
