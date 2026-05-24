@@ -13,7 +13,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import ru.kalinin.context.model.ContextRequest;
 import ru.kalinin.context.model.ContextResponse;
-import ru.kalinin.context.model.SourceLinesRequest;
+import ru.kalinin.context.model.GitLabLinesRequest;
+import ru.kalinin.context.model.JarLinesRequest;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.service.ContextBuilderService;
 import ru.kalinin.context.service.SourceLinesService;
@@ -30,6 +31,10 @@ public class ContextController {
 
     private final ContextBuilderService contextBuilderService;
     private final SourceLinesService sourceLinesService;
+
+    // -------------------------------------------------------------------------
+    // Context
+    // -------------------------------------------------------------------------
 
     @Operation(
             summary = "Построить контекст классов",
@@ -49,16 +54,10 @@ public class ContextController {
                     description = "Контекст успешно построен",
                     content = @Content(schema = @Schema(implementation = ContextResponse.class))
             ),
-            @ApiResponse(
-                    responseCode = "400",
-                    description = "Ошибка валидации входящего запроса",
-                    content = @Content(schema = @Schema())
-            ),
-            @ApiResponse(
-                    responseCode = "500",
-                    description = "Ошибка обращения к GitLab API или парсинга",
-                    content = @Content(schema = @Schema())
-            )
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema())),
+            @ApiResponse(responseCode = "500", description = "Ошибка GitLab API или парсинга",
+                    content = @Content(schema = @Schema()))
     })
     @PostMapping("/context")
     public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody ContextRequest request) {
@@ -71,37 +70,75 @@ public class ContextController {
         return ResponseEntity.ok(response);
     }
 
+    // -------------------------------------------------------------------------
+    // Source lines — GitLab
+    // -------------------------------------------------------------------------
+
     @Operation(
-            summary = "Получить исходный код строк",
+            summary = "Получить строки из файлов GitLab",
             description = """
-                    Для каждого переданного файла читает исходник из GitLab и возвращает
-                    содержимое указанных диапазонов строк.
+                    Читает исходники из GitLab-репозитория и возвращает содержимое
+                    указанных диапазонов строк.
 
-                    Формат диапазона — тот же, что в `rows` у `StructureNode`:
-                    `"17"` (1 строка) или `"19-22"` (диапазон, включительно).
+                    Формат диапазона совпадает с полем `rows` у `StructureNode`:
+                    `"17"` (одна строка) или `"19-22"` (включительно с обеих сторон).
 
-                    Если файл не найден или недоступен, в ответе для него будет заполнено
-                    поле `error` вместо `snippets`.
+                    Ошибки по отдельным файлам возвращаются в теле ответа (HTTP 200)
+                    в поле `error` вместо `snippets`.
                     """
     )
     @ApiResponses({
             @ApiResponse(
                     responseCode = "200",
-                    description = "Строки получены (ошибки по отдельным файлам возвращаются в теле ответа)",
+                    description = "Строки получены (ошибки по файлам — в теле)",
                     content = @Content(schema = @Schema(implementation = SourceLinesResponse.class))
             ),
-            @ApiResponse(
-                    responseCode = "400",
-                    description = "Ошибка валидации",
-                    content = @Content(schema = @Schema())
-            )
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema()))
     })
-    @PostMapping("/source-lines")
-    public ResponseEntity<SourceLinesResponse> getSourceLines(
-            @Valid @RequestBody SourceLinesRequest request) {
-        log.info("Fetching source lines: project='{}', ref='{}', files={}",
+    @PostMapping("/source-lines/gitlab")
+    public ResponseEntity<SourceLinesResponse> getGitLabLines(
+            @Valid @RequestBody GitLabLinesRequest request) {
+        log.info("Fetching GitLab source lines: project='{}', ref='{}', files={}",
                 request.projectId(), request.ref(), request.files().size());
-        SourceLinesResponse response = sourceLinesService.fetchLines(request);
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(sourceLinesService.fetchFromGitLab(request));
+    }
+
+    // -------------------------------------------------------------------------
+    // Source lines — Jar
+    // -------------------------------------------------------------------------
+
+    @Operation(
+            summary = "Получить строки из sources.jar зависимости",
+            description = """
+                    Читает исходники из локального `*-sources.jar` и возвращает
+                    содержимое указанных диапазонов строк.
+
+                    `source` — Maven-координаты в формате `groupId:artifactId:version`,
+                    точно соответствующие полю `source` в `ClassContext`
+                    (например `org.aspectj:aspectjweaver:1.9.22`).
+
+                    `qualifiedName` — полное имя класса внутри jar
+                    (например `org.aspectj.weaver.Advice`).
+
+                    Формат диапазона совпадает с полем `rows` у `StructureNode`:
+                    `"17"` или `"19-22"`.
+                    """
+    )
+    @ApiResponses({
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Строки получены (ошибки по классам — в теле)",
+                    content = @Content(schema = @Schema(implementation = SourceLinesResponse.class))
+            ),
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema()))
+    })
+    @PostMapping("/source-lines/jar")
+    public ResponseEntity<SourceLinesResponse> getJarLines(
+            @Valid @RequestBody JarLinesRequest request) {
+        log.info("Fetching jar source lines: source='{}', classes={}",
+                request.source(), request.classes().size());
+        return ResponseEntity.ok(sourceLinesService.fetchFromJar(request));
     }
 }
