@@ -21,26 +21,18 @@ import java.util.regex.Pattern;
  * из Artifactory и сохраняет их на диск.
  *
  * <h3>Кэширование на диске</h3>
- * <p>Каждый скачанный файл сохраняется в {@code artifactsDir} (по умолчанию {@code /artifacts}).
- * Двойное подчёркивание ({@code __}) используется как разделитель для избежания
- * неоднозначности при дефисе в groupId/artifactId/version.
- * При повторном запросе файл читается с диска без сетевого вызова.
+ * <p>{@code sources.jar} и {@code .module} кэшируются: при повторном запросе
+ * читаются с диска без сетевого вызова.
+ * {@code maven-metadata.xml} не кэшируется: каждый раз скачивается заново из сети
+ * (чтобы всегда видеть актуальный список версий), но сохраняется на диск
+ * для информации (с постфиксом времени в имени файла).
+ * Двойное подчёркивание ({@code __}) используется как разделитель в именах
+ * файлов для избежания неоднозначности при дефисе в groupId/artifactId/version.
  *
  * <h3>Динамические версии</h3>
  * <p>Если версия в {@code .module}-файле содержит {@code +} или
  * записана в формате Maven range ({@code [x,)}, {@code (,x]}, ...),
- * выполняется резолвинг через {@code maven-metadata.xml}:
- * <ol>
- *   <li>Скачать / взять с диска {@code maven-metadata.xml} для данного
- *       {@code groupId:artifactId}.</li>
- *   <li>Извлечь {@code <release>} → если нет, {@code <latest>} → если нет,
- *       последнюю версию из {@code <versions>}.</li>
- *   <li>Для range-записей (например {@code [2.1.0,)}) из
- *       списка версий выбирается наибольшая версия,
- *       удовлетворяющая ограничению (lower bound).</li>
- * </ol>
- * {@code maven-metadata.xml} кэшируется на диск с префиксом {@code metadata__}
- * для отличия от jar-файлов.
+ * выполняется резолвинг через {@code maven-metadata.xml}.
  */
 @Slf4j
 @Component
@@ -166,6 +158,15 @@ public class ArtifactorySourcesLoader {
         return result;
     }
 
+    /**
+     * @deprecated Используйте {@link #parseApiDependencies(Path, DependencyCoordinate, List)}.
+     */
+    @Deprecated
+    public List<DependencyCoordinate> parseApiDependencies(Path moduleFilePath,
+                                                           DependencyCoordinate parentDep) {
+        return parseApiDependencies(moduleFilePath, parentDep, List.of());
+    }
+
     // ── Динамические версии ─────────────────────────────────────────────
 
     private String resolveVersionIfDynamic(String version, String group, String module,
@@ -197,42 +198,53 @@ public class ArtifactorySourcesLoader {
                 || trimmed.startsWith("(");
     }
 
+    /**
+     * Скачивает {@code maven-metadata.xml} из сети (всегда, без кэша).
+     *
+     * <p>Сохраняет скачанный файл на диск для информации, но не читает его
+     * при повторных запросах. Имя файла включает метку временистамп чтобы
+     * не перезаписывать предыдущие снимки.
+     */
     private Optional<String> fetchMavenMetadata(String group, String module,
                                                  List<String> repoUrls) {
-        String safeName = group.replace('.', '_') + "__" + module;
-        Path localPath = artifactsDir.resolve("metadata__" + safeName + ".xml");
-
-        if (Files.exists(localPath)) {
-            log.debug("maven-metadata.xml cache hit: {}", localPath);
-            try {
-                return Optional.of(Files.readString(localPath));
-            } catch (IOException e) {
-                log.warn("Failed to read cached metadata {}: {}", localPath, e.getMessage());
-            }
-        }
-
         String relPath = group.replace('.', '/') + '/' + module + "/maven-metadata.xml";
+
         for (String repoUrl : repoUrls) {
             String base = repoUrl.endsWith("/")
                     ? repoUrl.substring(0, repoUrl.length() - 1) : repoUrl;
             String url = base + '/' + relPath;
-            log.debug("Trying maven-metadata.xml: {}", url);
+            log.debug("Fetching maven-metadata.xml: {}", url);
             try {
                 String xml = restClient.get().uri(url).retrieve().body(String.class);
                 if (xml != null && !xml.isBlank()) {
-                    Files.writeString(localPath, xml,
-                            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                    log.debug("Cached maven-metadata.xml → {}", localPath);
+                    saveMetadataSnapshot(group, module, xml);
                     return Optional.of(xml);
                 }
             } catch (RestClientException e) {
                 log.debug("maven-metadata.xml not found at {}: {}", url, e.getMessage());
-            } catch (IOException e) {
-                log.warn("Failed to cache maven-metadata.xml for {}:{}: {}",
-                        group, module, e.getMessage());
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Сохраняет снимок {@code maven-metadata.xml} на диск для информации.
+     *
+     * <p>Имя файла: {@code metadata__<group>__<module>__<timestamp>.xml}.
+     * Ошибка записи не прерывает обработку — логируется на уровне WARN.
+     */
+    private void saveMetadataSnapshot(String group, String module, String xml) {
+        String safeName = group.replace('.', '_') + "__" + module;
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        Path localPath = artifactsDir.resolve("metadata__" + safeName + "__" + timestamp + ".xml");
+        try {
+            Files.writeString(localPath, xml,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            log.debug("Saved maven-metadata.xml snapshot → {}", localPath);
+        } catch (IOException e) {
+            log.warn("Failed to save maven-metadata.xml snapshot for {}:{}: {}",
+                    group, module, e.getMessage());
+        }
     }
 
     private Optional<String> resolveFromMetadata(String xml, String versionExpr,
@@ -257,7 +269,6 @@ public class ArtifactorySourcesLoader {
             if (release != null && release.startsWith(prefix)) {
                 return Optional.of(release);
             }
-            // Максимальная версия с данным префиксом — явный Comparator<List<Integer>>
             return versions.stream()
                     .filter(v -> v.startsWith(prefix))
                     .max(Comparator.comparing(
@@ -284,7 +295,7 @@ public class ArtifactorySourcesLoader {
                         String upper, boolean upperInclusive) {
 
         static VersionRange parse(String expr) {
-            String s    = expr.trim();
+            String s      = expr.trim();
             boolean loInc = s.startsWith("[");
             boolean hiInc = s.endsWith("]");
             String inner  = s.substring(1, s.length() - 1);
