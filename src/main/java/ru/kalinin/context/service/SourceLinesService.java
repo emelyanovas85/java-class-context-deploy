@@ -2,21 +2,35 @@ package ru.kalinin.context.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import ru.kalinin.context.dependency.DependencyClassNameExtractor;
+import ru.kalinin.context.dependency.DependencyCoordinate;
 import ru.kalinin.context.model.SourceLinesRequest;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.model.SourceLinesResponse.FileResult;
 import ru.kalinin.context.model.SourceLinesResponse.Snippet;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Получает строки исходного кода из GitLab по диапазонам,
- * указанным в {@link SourceLinesRequest}.
+ * Получает строки исходного кода из GitLab или из локального {@code sources.jar}
+ * по диапазонам, указанным в {@link SourceLinesRequest}.
  *
  * <p>Формат диапазона — тот же, что используется в {@code StructureNode.rows()}:
  * {@code "17"} (одна строка) или {@code "19-22"} (включительно с обеих сторон).
+ *
+ * <h3>Маршрут для jar-источника</h3>
+ * <ol>
+ *   <li>{@code source} = {@code "groupId:artifactId:version"} разбирается в {@link DependencyCoordinate}.</li>
+ *   <li>jar ищется на диске по пути {@code artifactsDir/<localFileName()>}.</li>
+ *   <li>{@link DependencyClassNameExtractor#extractSourceFile} даёт содержимое файла.</li>
+ *   <li>{Строки извлекаются так же, как для GitLab-источника.}</li>
+ * </ol>
  */
 @Slf4j
 @Service
@@ -24,14 +38,16 @@ import java.util.List;
 public class SourceLinesService {
 
     private final GitLabService gitLabService;
+    private final DependencyClassNameExtractor classNameExtractor;
+
+    @Value("${app.artifacts-dir:artifacts}")
+    private String artifactsDirPath;
 
     public SourceLinesResponse fetchLines(SourceLinesRequest request) {
         List<FileResult> results = new ArrayList<>();
-
         for (SourceLinesRequest.FileLines fileLines : request.files()) {
             results.add(processFile(request, fileLines));
         }
-
         return new SourceLinesResponse(results);
     }
 
@@ -39,32 +55,66 @@ public class SourceLinesService {
 
     private FileResult processFile(SourceLinesRequest request,
                                    SourceLinesRequest.FileLines fileLines) {
-        String path = fileLines.filePath();
-        log.debug("Fetching lines for {}, rows={}", path, fileLines.rows());
+        Optional<String> content = fileLines.isJarSource()
+                ? readFromJar(fileLines)
+                : readFromGitLab(request, fileLines);
 
-        String content;
+        if (content.isEmpty()) {
+            return FileResult.ofError(fileLines.filePath(),
+                    "Content not found for: " + fileLines.filePath()
+                    + (fileLines.source() != null ? " [source=" + fileLines.source() + "]" : ""));
+        }
+
+        String[] lines = content.get().split("\n", -1);
+        List<Snippet> snippets = fileLines.rows().stream()
+                .map(rowSpec -> extractSnippet(lines, rowSpec))
+                .toList();
+        return FileResult.ofSnippets(fileLines.filePath(), snippets);
+    }
+
+    /**
+     * Читает файл из GitLab.
+     */
+    private Optional<String> readFromGitLab(SourceLinesRequest request,
+                                             SourceLinesRequest.FileLines fileLines) {
+        String path = fileLines.filePath();
+        log.debug("Reading from GitLab: {}", path);
         try {
-            var opt = gitLabService.readRawFileContent(
+            return gitLabService.readRawFileContent(
                     request.gitlabUrl(), request.token(),
                     request.projectId(), request.ref(), path);
-            if (opt.isEmpty()) {
-                log.warn("File not found: {}", path);
-                return FileResult.ofError(path, "File not found: " + path);
-            }
-            content = opt.get();
         } catch (RuntimeException e) {
-            log.warn("Failed to read file {}: {}", path, e.getMessage());
-            return FileResult.ofError(path, e.getMessage());
+            log.warn("Failed to read from GitLab {}: {}", path, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Читает файл из локального sources.jar.
+     *
+     * <p>source формат: {@code "groupId:artifactId:version"}.<br>
+     * filePath — qualified name класса, например {@code "org.aspectj.weaver.Advice"}.
+     */
+    private Optional<String> readFromJar(SourceLinesRequest.FileLines fileLines) {
+        String source = fileLines.source();
+        String qualifiedName = fileLines.filePath();
+        log.debug("Reading from jar [{}]: {}", source, qualifiedName);
+
+        String[] parts = source.split(":", 3);
+        if (parts.length != 3) {
+            log.warn("Invalid source format '{}', expected groupId:artifactId:version", source);
+            return Optional.empty();
         }
 
-        String[] lines = content.split("\n", -1);
-        List<Snippet> snippets = new ArrayList<>();
+        DependencyCoordinate coord = new DependencyCoordinate(parts[0], parts[1], parts[2]);
+        Path jarPath = Path.of(artifactsDirPath).resolve(coord.localFileName());
 
-        for (String rowSpec : fileLines.rows()) {
-            snippets.add(extractSnippet(lines, rowSpec));
+        if (!Files.exists(jarPath)) {
+            log.warn("sources.jar not found on disk: {}", jarPath);
+            return Optional.empty();
         }
 
-        return FileResult.ofSnippets(path, snippets);
+        return classNameExtractor.extractSourceFile(jarPath, qualifiedName);
     }
 
     /**
@@ -73,7 +123,7 @@ public class SourceLinesService {
      * @param lines   все строки файла (0-based массив)
      * @param rowSpec диапазон в формате {@code "17"} или {@code "19-22"} (1-based, включительно)
      */
-    private Snippet extractSnippet(String[] lines, String rowSpec) {
+    static Snippet extractSnippet(String[] lines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
         try {
@@ -88,7 +138,6 @@ public class SourceLinesService {
             return new Snippet(rowSpec, "// invalid row spec: " + rowSpec);
         }
 
-        // Привести к допустимым границам
         int clampedFrom = Math.max(1, from);
         int clampedTo   = Math.min(lines.length, to);
 
