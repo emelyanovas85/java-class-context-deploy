@@ -1,5 +1,7 @@
 package ru.kalinin.context.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.gitlab4j.api.GitLabApi;
 import org.gitlab4j.api.GitLabApiException;
@@ -29,31 +31,33 @@ import java.util.*;
  *       {@code oldPath} остаётся из target-индекса.</li>
  *   <li>Изменённые — путь не меняется, индекс не трогается.</li>
  * </ul>
- * Индекс не кэшируется в поле сервиса: он строится один раз в рамках buildContext()
- * и передаётся дальше как локальная переменная.
+ *
+ * <h2>Кэш индекса</h2>
+ * <p>Равный индекс ({@link #buildRawIndex}) кэшируется в {@code fileIndexCache}
+ * по ключу {@code "gitlabUrl::projectId::branch"} с TTL
+ * {@code expireAfterAccess}. Мёрженный индекс ({@link #buildMergedFileIndex})
+ * не кэшируется: его наложение патча специфично для MR и строится
+ * быстро поверх кэшированного raw-индекса.
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class GitLabService {
 
     /**
-     * Суффиксы файлов сборки.
-     * Читаются все *.gradle, *.gradle.kts и pom.xml,
-     * чтобы охватить allure.gradle, repositories.gradle и прочие
-     * включаемые конфигурации.
+     * Кэш raw-индексов: ключ = {@code "gitlabUrl::projectId::branch"},
+     * значение = {@code Map<simpleName.java, List<fullPath>>}.
      */
-    private static final List<String> BUILD_FILE_SUFFIXES = List.of(
-            ".gradle", ".gradle.kts"
-    );
+    private final Cache<String, Map<String, List<String>>> fileIndexCache;
+
+    private static final List<String> BUILD_FILE_SUFFIXES = List.of(".gradle", ".gradle.kts");
     private static final String POM_XML = "pom.xml";
+    private static final String CACHE_KEY_SEPARATOR = "::";
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Получить метаданные мёрж-реквеста.
-     */
     public MergeRequestInfo getMergeRequestInfo(String gitlabUrl, String token,
                                                 String projectId, long mrIid) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
@@ -75,7 +79,6 @@ public class GitLabService {
                     .getMergeRequestChanges(projectId, mrIid)
                     .getChanges();
 
-            // changedFiles — только не-удалённые .java файлы (для уровня 0)
             List<String> changedFiles = diffs.stream()
                     .filter(d -> !d.getDeletedFile())
                     .map(Diff::getNewPath)
@@ -99,10 +102,6 @@ public class GitLabService {
         }
     }
 
-    /**
-     * Прочитать содержимое Java-файла из репозитория GitLab.
-     * Возвращает {@code Optional.empty()} если файл не найден или не .java
-     */
     public Optional<String> readFileContent(String gitlabUrl, String token, String projectId,
                                             String branch, String filePath) {
         if (!filePath.endsWith(".java")) {
@@ -111,12 +110,6 @@ public class GitLabService {
         return readRawFileContent(gitlabUrl, token, projectId, branch, filePath);
     }
 
-    /**
-     * Прочитать содержимое произвольного файла без проверки расширения.
-     * Используется для чтения файлов сборки (*.gradle, *.gradle.kts, pom.xml и т.д.).
-     *
-     * @return содержимое файла или {@code Optional.empty()} если файл не найден (404)
-     */
     public Optional<String> readRawFileContent(String gitlabUrl, String token, String projectId,
                                                String branch, String filePath) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
@@ -134,18 +127,6 @@ public class GitLabService {
         }
     }
 
-    /**
-     * Найти все файлы сборки в уже готовом индексе.
-     *
-     * <p>Читаются:
-     * <ul>
-     *   <li>все файлы *.gradle и *.gradle.kts — не только build.gradle,
-     *       но также allure.gradle, repositories.gradle и прочие;</li>
-     *   <li>pom.xml.</li>
-     * </ul>
-     *
-     * @param fileIndex мёрженный файловый индекс из {@link #buildMergedFileIndex}
-     */
     public List<String> findBuildFiles(Map<String, List<String>> fileIndex) {
         List<String> result = new ArrayList<>();
         for (Map.Entry<String, List<String>> entry : fileIndex.entrySet()) {
@@ -158,13 +139,6 @@ public class GitLabService {
         return result;
     }
 
-    /**
-     * Построить мёрженный индекс для резолвинга зависимостей.
-     *
-     * <p>Базой служит target-ветка, затем поверх неё накладывается patch из diff MR.
-     * Получившийся индекс используется в рамках одного buildContext()
-     * и передаётся дальше как локальная переменная.
-     */
     public Map<String, List<String>> buildMergedFileIndex(String gitlabUrl, String token,
                                                           String projectId, String targetBranch,
                                                           List<Diff> mrDiffs) {
@@ -188,12 +162,6 @@ public class GitLabService {
         return Collections.unmodifiableMap(index);
     }
 
-    /**
-     * Найти путь к .java-файлу по qualified name класса в уже построенном индексе.
-     *
-     * @param fileIndex     мёрженный индекс из {@link #buildMergedFileIndex}
-     * @param qualifiedName полное имя класса, например {@code com.example.Foo}
-     */
     public Optional<String> findJavaFileByQualifiedName(Map<String, List<String>> fileIndex,
                                                         String qualifiedName) {
         String simpleName = qualifiedName.contains(".")
@@ -226,47 +194,53 @@ public class GitLabService {
         return mainFirst.isPresent() ? mainFirst : Optional.of(candidates.get(0));
     }
 
-    // -------------------------------------------------------------------------
-    // Internal index building
-    // -------------------------------------------------------------------------
-
-    private Map<String, List<String>> buildRawIndex(String gitlabUrl, String token,
+    /**
+     * Строит raw-индекс для ветки, используя кэш.
+     *
+     * <p>При попадании — возвращает из кэша без запроса к GitLab.
+     * При промахе — запрашивает полное дерево и сохраняет в кэш.
+     */
+    public Map<String, List<String>> buildRawIndex(String gitlabUrl, String token,
                                                     String projectId, String branch) {
+        String cacheKey = gitlabUrl + CACHE_KEY_SEPARATOR + projectId + CACHE_KEY_SEPARATOR + branch;
+        Map<String, List<String>> cached = fileIndexCache.getIfPresent(cacheKey);
+        if (cached != null) {
+            log.debug("File index cache hit: project={} branch={}", projectId, branch);
+            return cached;
+        }
+
         log.info("Building raw file index for project={} branch={}", projectId, branch);
         Map<String, List<String>> index = new HashMap<>();
 
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
-            var pager = api.getRepositoryApi()
-                    .getTree(projectId, null, branch, true, 100);
-
-            while (pager.hasNext()) {
-                for (TreeItem item : pager.next()) {
-                    if (item.getType() == TreeItem.Type.BLOB) {
-                        index.computeIfAbsent(item.getName(), k -> new ArrayList<>())
-                                .add(item.getPath());
+            List<TreeItem> tree = api.getRepositoryApi()
+                    .getTree(projectId, null, null, true);
+            for (TreeItem item : tree) {
+                if (item.getType() == TreeItem.Type.BLOB) {
+                    String path = item.getPath();
+                    String name = fileName(path);
+                    if (isBuildFile(name) || path.endsWith(".java")) {
+                        index.computeIfAbsent(name, k -> new ArrayList<>()).add(path);
                     }
                 }
             }
         } catch (GitLabApiException e) {
             throw new RuntimeException(
-                    "Failed to build file index for " + projectId + "@" + branch
-                            + ": " + e.getMessage(), e);
+                    "Error building file index for " + projectId + ": " + e.getMessage(), e);
         }
 
-        log.info("Raw file index built: {} unique filenames, project={} branch={}",
+        Map<String, List<String>> unmodifiable = Collections.unmodifiableMap(index);
+        fileIndexCache.put(cacheKey, unmodifiable);
+        log.info("Raw file index cached: {} unique filenames, project={} branch={}",
                 index.size(), projectId, branch);
-        return index;
+        return unmodifiable;
     }
 
     // -------------------------------------------------------------------------
-    // Helpers
+    // Internal helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Проверяет, является ли файл файлом сборки.
-     * Считаются: *.gradle, *.gradle.kts, pom.xml.
-     */
-    static boolean isBuildFile(String name) {
+    private boolean isBuildFile(String name) {
         if (POM_XML.equals(name)) return true;
         for (String suffix : BUILD_FILE_SUFFIXES) {
             if (name.endsWith(suffix)) return true;
@@ -276,6 +250,6 @@ public class GitLabService {
 
     private static String fileName(String path) {
         int slash = path.lastIndexOf('/');
-        return slash >= 0 ? path.substring(slash + 1) : path;
+        return slash < 0 ? path : path.substring(slash + 1);
     }
 }

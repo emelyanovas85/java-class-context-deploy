@@ -10,6 +10,9 @@ import java.util.List;
 /**
  * Запрос на получение строк из файлов GitLab-репозитория.
  *
+ * <p>Файл идентифицируется по {@code qualifiedName} класса — сервер
+ * сам определяет путь через файловый индекс (TTL-кэш 15 минут).
+ *
  * <p>Формат диапазона строк — тот же, что в {@link StructureNode#rows()}:
  * {@code "17"} (одна строка) или {@code "19-22"} (включительно).
  */
@@ -32,27 +35,27 @@ public record GitLabLinesRequest(
         @NotBlank(message = "ref must not be blank")
         String ref,
 
-        @Schema(description = "Список файлов и нужных строк")
-        @NotEmpty(message = "files must not be empty")
+        @Schema(description = "Список классов и нужных строк")
+        @NotEmpty(message = "classes must not be empty")
         @Valid
-        List<FileLines> files
+        List<ClassLines> classes
 ) {
 
     /**
-     * Один файл с набором диапазонов.
+     * Один класс с набором диапазонов.
      *
-     * @param filePath путь в репозитории, например {@code src/main/java/com/example/Foo.java}
-     * @param rows     диапазоны строк
+     * @param qualifiedName полное имя класса, например {@code simpleTest.credit.T6546}
+     * @param rows          диапазоны строк
      */
-    @Schema(description = "Файл и запрашиваемые диапазоны")
-    public record FileLines(
+    @Schema(description = "Класс и запрашиваемые диапазоны")
+    public record ClassLines(
 
-            @Schema(description = "Путь к файлу в репозитории",
-                    example = "src/main/java/com/example/Foo.java")
-            @NotBlank(message = "filePath must not be blank")
-            String filePath,
+            @Schema(description = "Qualified name класса",
+                    example = "simpleTest.credit.T6546")
+            @NotBlank(message = "qualifiedName must not be blank")
+            String qualifiedName,
 
-            @Schema(description = "Диапазоны строк", example = "[\"17\", \"19-22\"]")
+            @Schema(description = "Диапазоны строк", example = "[\"28-168\"]")
             @NotEmpty(message = "rows must not be empty")
             List<String> rows
     ) {}

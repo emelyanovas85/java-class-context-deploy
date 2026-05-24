@@ -28,6 +28,9 @@ dependencies {
     // JavaParser — парсинг Java-исходников (поддерживает синтаксис Java 21)
     implementation 'com.github.javaparser:javaparser-core:3.26.3'
 
+    // Caffeine — TTL-кэш для индекса файлов GitLab
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+
     // Lombok
     compileOnly 'org.projectlombok:lombok:1.18.36'
     annotationProcessor 'org.projectlombok:lombok:1.18.36'

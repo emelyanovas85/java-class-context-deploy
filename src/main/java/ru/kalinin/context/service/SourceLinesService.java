@@ -14,8 +14,8 @@ import ru.kalinin.context.model.SourceLinesResponse.Snippet;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -35,36 +35,53 @@ public class SourceLinesService {
     @Value("${app.artifacts-dir:artifacts}")
     private String artifactsDirPath;
 
-    // ── GitLab ─────────────────────────────────────────────────────────────
+    // ── GitLab ────────────────────────────────────────────────────────────
 
+    /**
+     * Читает строки из GitLab.
+     *
+     * <p>Файл резолвится по qualified name через файловый индекс
+     * (TTL-кэш 15 минут: первый вызов медленный, повторные — мгновенные).
+     */
     public SourceLinesResponse fetchFromGitLab(GitLabLinesRequest request) {
-        List<FileResult> results = request.files().stream()
-                .map(f -> processGitLabFile(request, f))
+        // Индекс берётся из кэша или строится один раз для всех классов в запросе
+        Map<String, List<String>> index = gitLabService.buildRawIndex(
+                request.gitlabUrl(), request.token(), request.projectId(), request.ref());
+
+        List<FileResult> results = request.classes().stream()
+                .map(c -> processGitLabClass(request, index, c))
                 .toList();
         return new SourceLinesResponse(results);
     }
 
-    private FileResult processGitLabFile(GitLabLinesRequest request,
-                                         GitLabLinesRequest.FileLines fileLines) {
-        String path = fileLines.filePath();
-        log.debug("Reading from GitLab: {}", path);
+    private FileResult processGitLabClass(GitLabLinesRequest request,
+                                          Map<String, List<String>> index,
+                                          GitLabLinesRequest.ClassLines classLines) {
+        String qName = classLines.qualifiedName();
+
+        Optional<String> filePath = gitLabService.findJavaFileByQualifiedName(index, qName);
+        if (filePath.isEmpty()) {
+            log.warn("Class not found in index: {}", qName);
+            return FileResult.ofError(qName, "File not found in repository for class: " + qName);
+        }
+
+        log.debug("Resolved {} -> {}", qName, filePath.get());
 
         Optional<String> content;
         try {
             content = gitLabService.readRawFileContent(
                     request.gitlabUrl(), request.token(),
-                    request.projectId(), request.ref(), path);
+                    request.projectId(), request.ref(), filePath.get());
         } catch (RuntimeException e) {
-            log.warn("Failed to read from GitLab {}: {}", path, e.getMessage());
-            return FileResult.ofError(path, e.getMessage());
+            log.warn("Failed to read {}: {}", filePath.get(), e.getMessage());
+            return FileResult.ofError(qName, e.getMessage());
         }
 
         if (content.isEmpty()) {
-            log.warn("File not found in GitLab: {}", path);
-            return FileResult.ofError(path, "File not found: " + path);
+            return FileResult.ofError(qName, "File not found: " + filePath.get());
         }
 
-        return toFileResult(path, content.get(), fileLines.rows());
+        return toFileResult(qName, content.get(), classLines.rows());
     }
 
     // ── Jar ───────────────────────────────────────────────────────────────
@@ -76,7 +93,6 @@ public class SourceLinesService {
 
         if (!Files.exists(jarPath)) {
             log.warn("sources.jar not found: {}", jarPath);
-            // Ошибка сразу для всех классов — jar не найден
             List<FileResult> errors = request.classes().stream()
                     .map(c -> FileResult.ofError(c.qualifiedName(),
                             "sources.jar not found for " + request.source()))
@@ -113,12 +129,6 @@ public class SourceLinesService {
         return FileResult.ofSnippets(label, snippets);
     }
 
-    /**
-     * Извлекает строки по спецификации диапазона.
-     *
-     * @param lines   0-based массив строк файла
-     * @param rowSpec диапазон {@code "17"} или {@code "19-22"} (1-based, включительно)
-     */
     static Snippet extractSnippet(String[] lines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
