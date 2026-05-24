@@ -7,33 +7,42 @@ import java.util.List;
 
 /**
  * Ответ с содержимым запрошенных строк.
+ *
+ * <p>Каждый элемент {@code snippets} — это строки одного диапазона
+ * в формате {@code "19: public void foo() {\n20:     bar();"}.
+ * Порядок элементов соответствует порядку элементов в {@code rows} запроса.
  */
-@Schema(description = "Строки исходного кода из GitLab-файлов")
+@Schema(description = "Строки исходного кода")
 public record SourceLinesResponse(
 
-        @Schema(description = "Результаты по каждому файлу")
+        @Schema(description = "Результаты по каждому классу")
         List<FileResult> files
 ) {
 
     /**
-     * Результат для одного файла.
+     * Результат для одного класса.
      *
-     * @param filePath путь к файлу
-     * @param error    сообщение об ошибке (если файл не найден или недоступен)
-     * @param snippets найденные сниппеты, {@code null} при ошибке
+     * @param filePath qualified name или путь к файлу
+     * @param error    сообщение об ошибке ({@code null} при успехе)
+     * @param snippets список сниппетов по каждому диапазону из {@code rows},
+     *                 {@code null} при ошибке
      */
-    @Schema(description = "Результат для одного файла")
+    @Schema(description = "Результат для одного класса")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record FileResult(
 
-            @Schema(description = "Путь к файлу")
+            @Schema(description = "Qualified name или путь к файлу")
             String filePath,
 
-            @Schema(description = "Ошибка, если файл недоступен (иначе null)")
+            @Schema(description = "Ошибка, если класс недоступен (иначе null)")
             String error,
 
-            @Schema(description = "Сниппеты по запрошенным диапазонам (null при ошибке)")
-            List<Snippet> snippets
+            @Schema(
+                    description = "Сниппеты по диапазонам в порядке rows. Каждый элемент —"
+                            + " строки одного диапазона с префиксом номера строки."
+                            + " null при ошибке.",
+                    example = "[\"19: public void foo() {\\n20:     bar();\\n21: }\"]")
+            List<String> snippets
     ) {
 
         /** Фабричный метод для случая ошибки. */
@@ -42,25 +51,8 @@ public record SourceLinesResponse(
         }
 
         /** Фабричный метод для успешного результата. */
-        public static FileResult ofSnippets(String filePath, List<Snippet> snippets) {
+        public static FileResult ofSnippets(String filePath, List<String> snippets) {
             return new FileResult(filePath, null, snippets);
         }
     }
-
-    /**
-     * Один сниппет — строки одного диапазона.
-     *
-     * @param rows    запрошенный диапазон в оригинальном формате ({@code "17"} или {@code "19-22"})
-     * @param content конкатенированные строки с префиксом номера строки
-     */
-    @Schema(description = "Строки одного диапазона")
-    public record Snippet(
-
-            @Schema(description = "Запрошенный диапазон", example = "19-22")
-            String rows,
-
-            @Schema(description = "Строки с номерами",
-                    example = "19: public void foo() {\n20:     bar();\n21: }")
-            String content
-    ) {}
 }
