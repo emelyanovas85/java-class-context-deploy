@@ -13,6 +13,7 @@ import ru.kalinin.context.model.SourceLinesResponse.FileResult;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,8 +23,8 @@ import java.util.Optional;
  *
  * <p>Формат диапазона — тот же, что в {@code StructureNode.rows()}:
  * {@code "17"} (одна строка) или {@code "19-22"} (включительно).
- * Каждый элемент {@code snippets} в ответе — многострочный контент диапазона
- * с префиксом номера строки ({@code "19: public void foo() {\n20:     bar();"}).
+ * Каждый диапазон возвращается отдельным списком строк с префиксом номера
+ * ({@code "19: public void foo() {"}).
  */
 @Slf4j
 @Service
@@ -151,20 +152,20 @@ public class SourceLinesService {
 
     private FileResult toFileResult(String label, String content, List<String> rows) {
         String[] lines = content.split("\n", -1);
-        List<String> snippets = rows.stream()
+        List<List<String>> snippets = rows.stream()
                 .map(rowSpec -> extractSnippet(lines, rowSpec))
                 .toList();
         return FileResult.ofSnippets(label, snippets);
     }
 
     /**
-     * Извлекает строки диапазона в виде одной строки с префиксами номеров.
+     * Извлекает строки диапазона в виде списка; каждая строка — {@code "N: <content>"}.
      *
      * @param lines   0-based массив строк файла
      * @param rowSpec диапазон {@code "17"} или {@code "19-22"} (1-based, включительно)
-     * @return строки диапазона, разделённые {@code \n}, с префиксом номера строки
+     * @return список строк диапазона; при ошибке — список с одним сообщением-комментарием
      */
-    static String extractSnippet(String[] lines, String rowSpec) {
+    static List<String> extractSnippet(String[] lines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
         try {
@@ -176,21 +177,20 @@ public class SourceLinesService {
             }
         } catch (NumberFormatException e) {
             log.warn("Invalid row spec '{}': {}", rowSpec, e.getMessage());
-            return "// invalid row spec: " + rowSpec;
+            return List.of("// invalid row spec: " + rowSpec);
         }
 
         int clampedFrom = Math.max(1, from);
         int clampedTo   = Math.min(lines.length, to);
 
         if (clampedFrom > clampedTo) {
-            return "// lines " + rowSpec + " out of range (file has " + lines.length + " lines)";
+            return List.of("// lines " + rowSpec + " out of range (file has " + lines.length + " lines)");
         }
 
-        StringBuilder sb = new StringBuilder();
+        List<String> result = new ArrayList<>(clampedTo - clampedFrom + 1);
         for (int i = clampedFrom; i <= clampedTo; i++) {
-            sb.append(i).append(": ").append(lines[i - 1]);
-            if (i < clampedTo) sb.append('\n');
+            result.add(i + ": " + lines[i - 1]);
         }
-        return sb.toString();
+        return result;
     }
 }
