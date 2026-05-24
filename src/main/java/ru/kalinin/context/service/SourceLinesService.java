@@ -40,11 +40,11 @@ public class SourceLinesService {
     /**
      * Читает строки из GitLab.
      *
-     * <p>Файл резолвится по qualified name через файловый индекс
-     * (TTL-кэш 15 минут: первый вызов медленный, повторные — мгновенные).
+     * <p>Индекс берётся из кэша или строится один раз для всех классов запроса.
+     * Поле {@code source} в {@link GitLabLinesRequest.ClassLines} используется
+     * для разрешения коллизий main/test.
      */
     public SourceLinesResponse fetchFromGitLab(GitLabLinesRequest request) {
-        // Индекс берётся из кэша или строится один раз для всех классов в запросе
         Map<String, List<String>> index = gitLabService.buildRawIndex(
                 request.gitlabUrl(), request.token(), request.projectId(), request.ref());
 
@@ -58,11 +58,14 @@ public class SourceLinesService {
                                           Map<String, List<String>> index,
                                           GitLabLinesRequest.ClassLines classLines) {
         String qName = classLines.qualifiedName();
+        String pathPrefix = classLines.sourcePathPrefix();
 
-        Optional<String> filePath = gitLabService.findJavaFileByQualifiedName(index, qName);
+        Optional<String> filePath = findWithSourceHint(index, qName, pathPrefix);
         if (filePath.isEmpty()) {
-            log.warn("Class not found in index: {}", qName);
-            return FileResult.ofError(qName, "File not found in repository for class: " + qName);
+            log.warn("Class not found in index: {} (source={})", qName, classLines.source());
+            return FileResult.ofError(qName,
+                    "File not found in repository for class: " + qName
+                    + (pathPrefix != null ? " under " + pathPrefix : ""));
         }
 
         log.debug("Resolved {} -> {}", qName, filePath.get());
@@ -82,6 +85,51 @@ public class SourceLinesService {
         }
 
         return toFileResult(qName, content.get(), classLines.rows());
+    }
+
+    /**
+     * Резолвит qualified name в путь с учётом подсказки source.
+     *
+     * <p>Порядок приоритетов:
+     * <ol>
+     *   <li>Пакетный суффикс внутри указанного pathPrefix (main/test)</li>
+     *   <li>Пакетный суффикс без ограничения prefix</li>
+     *   <li>Первый кандидат в индексе</li>
+     * </ol>
+     */
+    private Optional<String> findWithSourceHint(Map<String, List<String>> index,
+                                                String qualifiedName,
+                                                String pathPrefix) {
+        String simpleName = qualifiedName.contains(".")
+                ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
+                : qualifiedName;
+        if (simpleName.contains("$")) {
+            simpleName = simpleName.substring(0, simpleName.indexOf('$'));
+        }
+
+        List<String> candidates = index.getOrDefault(simpleName + ".java", List.of());
+        if (candidates.isEmpty()) return Optional.empty();
+        if (candidates.size() == 1) return Optional.of(candidates.get(0));
+
+        String packageSuffix = qualifiedName.replace('.', '/') + ".java";
+
+        // 1. пакет + prefix
+        if (pathPrefix != null) {
+            final String prefix = pathPrefix;
+            Optional<String> hit = candidates.stream()
+                    .filter(p -> p.startsWith(prefix) && p.endsWith(packageSuffix))
+                    .findFirst();
+            if (hit.isPresent()) return hit;
+        }
+
+        // 2. пакет без prefix
+        Optional<String> byPackage = candidates.stream()
+                .filter(p -> p.endsWith(packageSuffix))
+                .findFirst();
+        if (byPackage.isPresent()) return byPackage;
+
+        // 3. первый кандидат
+        return Optional.of(candidates.get(0));
     }
 
     // ── Jar ───────────────────────────────────────────────────────────────
@@ -119,7 +167,7 @@ public class SourceLinesService {
         return toFileResult(qName, content.get(), classLines.rows());
     }
 
-    // ── Общая логика извлечения строк ───────────────────────────────────────
+    // ── Общая логика ────────────────────────────────────────────────────────
 
     private FileResult toFileResult(String label, String content, List<String> rows) {
         String[] lines = content.split("\n", -1);

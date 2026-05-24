@@ -12,6 +12,8 @@ import java.util.List;
  *
  * <p>Файл идентифицируется по {@code qualifiedName} класса — сервер
  * сам определяет путь через файловый индекс (TTL-кэш 15 минут).
+ * Поле {@code source} уточняет поиск и устраняет коллизии между
+ * одноимёнными классами в main/test.
  *
  * <p>Формат диапазона строк — тот же, что в {@link StructureNode#rows()}:
  * {@code "17"} (одна строка) или {@code "19-22"} (включительно).
@@ -45,6 +47,10 @@ public record GitLabLinesRequest(
      * Один класс с набором диапазонов.
      *
      * @param qualifiedName полное имя класса, например {@code simpleTest.credit.T6546}
+     * @param source        источник из {@link ClassContext#source()}:
+     *                      {@code "main"}, {@code "test"} или {@code null}.
+     *                      Используется для разрешения коллизий
+     *                      между одноимёнными классами в main и test
      * @param rows          диапазоны строк
      */
     @Schema(description = "Класс и запрашиваемые диапазоны")
@@ -55,8 +61,23 @@ public record GitLabLinesRequest(
             @NotBlank(message = "qualifiedName must not be blank")
             String qualifiedName,
 
+            @Schema(
+                    description = "Источник из ClassContext.source(): \"main\" | \"test\" | null."
+                            + " Уточняет поиск при коллизии одноимённых классов.",
+                    example = "main",
+                    nullable = true
+            )
+            String source,
+
             @Schema(description = "Диапазоны строк", example = "[\"28-168\"]")
             @NotEmpty(message = "rows must not be empty")
             List<String> rows
-    ) {}
+    ) {
+        /** Префикс пути в репозитории для данного source. */
+        public String sourcePathPrefix() {
+            if ("test".equals(source)) return "src/test/java";
+            if ("main".equals(source)) return "src/main/java";
+            return null; // нет предпочтения
+        }
+    }
 }
