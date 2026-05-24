@@ -10,7 +10,6 @@ import ru.kalinin.context.model.GitLabLinesRequest;
 import ru.kalinin.context.model.JarLinesRequest;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.model.SourceLinesResponse.FileResult;
-import ru.kalinin.context.model.SourceLinesResponse.Snippet;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,7 +21,9 @@ import java.util.Optional;
  * Получает строки исходного кода из GitLab или из локального {@code sources.jar}.
  *
  * <p>Формат диапазона — тот же, что в {@code StructureNode.rows()}:
- * {@code "17"} (одна строка) или {@code "19-22"} (включительно с обеих сторон).
+ * {@code "17"} (одна строка) или {@code "19-22"} (включительно).
+ * Каждый элемент {@code snippets} в ответе — многострочный контент диапазона
+ * с префиксом номера строки ({@code "19: public void foo() {\n20:     bar();"}).
  */
 @Slf4j
 @Service
@@ -37,13 +38,6 @@ public class SourceLinesService {
 
     // ── GitLab ────────────────────────────────────────────────────────────
 
-    /**
-     * Читает строки из GitLab.
-     *
-     * <p>Индекс берётся из кэша или строится один раз для всех классов запроса.
-     * Поле {@code source} в {@link GitLabLinesRequest.ClassLines} используется
-     * для разрешения коллизий main/test.
-     */
     public SourceLinesResponse fetchFromGitLab(GitLabLinesRequest request) {
         Map<String, List<String>> index = gitLabService.buildRawIndex(
                 request.gitlabUrl(), request.token(), request.projectId(), request.ref());
@@ -87,16 +81,6 @@ public class SourceLinesService {
         return toFileResult(qName, content.get(), classLines.rows());
     }
 
-    /**
-     * Резолвит qualified name в путь с учётом подсказки source.
-     *
-     * <p>Порядок приоритетов:
-     * <ol>
-     *   <li>Пакетный суффикс внутри указанного pathPrefix (main/test)</li>
-     *   <li>Пакетный суффикс без ограничения prefix</li>
-     *   <li>Первый кандидат в индексе</li>
-     * </ol>
-     */
     private Optional<String> findWithSourceHint(Map<String, List<String>> index,
                                                 String qualifiedName,
                                                 String pathPrefix) {
@@ -113,22 +97,18 @@ public class SourceLinesService {
 
         String packageSuffix = qualifiedName.replace('.', '/') + ".java";
 
-        // 1. пакет + prefix
         if (pathPrefix != null) {
-            final String prefix = pathPrefix;
             Optional<String> hit = candidates.stream()
-                    .filter(p -> p.startsWith(prefix) && p.endsWith(packageSuffix))
+                    .filter(p -> p.startsWith(pathPrefix) && p.endsWith(packageSuffix))
                     .findFirst();
             if (hit.isPresent()) return hit;
         }
 
-        // 2. пакет без prefix
         Optional<String> byPackage = candidates.stream()
                 .filter(p -> p.endsWith(packageSuffix))
                 .findFirst();
         if (byPackage.isPresent()) return byPackage;
 
-        // 3. первый кандидат
         return Optional.of(candidates.get(0));
     }
 
@@ -167,17 +147,24 @@ public class SourceLinesService {
         return toFileResult(qName, content.get(), classLines.rows());
     }
 
-    // ── Общая логика ────────────────────────────────────────────────────────
+    // ── Общая логика ──────────────────────────────────────────────────────
 
     private FileResult toFileResult(String label, String content, List<String> rows) {
         String[] lines = content.split("\n", -1);
-        List<Snippet> snippets = rows.stream()
+        List<String> snippets = rows.stream()
                 .map(rowSpec -> extractSnippet(lines, rowSpec))
                 .toList();
         return FileResult.ofSnippets(label, snippets);
     }
 
-    static Snippet extractSnippet(String[] lines, String rowSpec) {
+    /**
+     * Извлекает строки диапазона в виде одной строки с префиксами номеров.
+     *
+     * @param lines   0-based массив строк файла
+     * @param rowSpec диапазон {@code "17"} или {@code "19-22"} (1-based, включительно)
+     * @return строки диапазона, разделённые {@code \n}, с префиксом номера строки
+     */
+    static String extractSnippet(String[] lines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
         try {
@@ -189,15 +176,14 @@ public class SourceLinesService {
             }
         } catch (NumberFormatException e) {
             log.warn("Invalid row spec '{}': {}", rowSpec, e.getMessage());
-            return new Snippet(rowSpec, "// invalid row spec: " + rowSpec);
+            return "// invalid row spec: " + rowSpec;
         }
 
         int clampedFrom = Math.max(1, from);
         int clampedTo   = Math.min(lines.length, to);
 
         if (clampedFrom > clampedTo) {
-            return new Snippet(rowSpec, "// lines " + rowSpec + " out of range (file has "
-                    + lines.length + " lines)");
+            return "// lines " + rowSpec + " out of range (file has " + lines.length + " lines)";
         }
 
         StringBuilder sb = new StringBuilder();
@@ -205,6 +191,6 @@ public class SourceLinesService {
             sb.append(i).append(": ").append(lines[i - 1]);
             if (i < clampedTo) sb.append('\n');
         }
-        return new Snippet(rowSpec, sb.toString());
+        return sb.toString();
     }
 }
