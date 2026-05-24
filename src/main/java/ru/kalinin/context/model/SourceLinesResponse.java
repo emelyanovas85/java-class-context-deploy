@@ -8,9 +8,9 @@ import java.util.List;
 /**
  * Ответ с содержимым запрошенных строк.
  *
- * <p>Каждый элемент {@code snippets} — список строк одного диапазона.
+ * <p>Строки всех диапазонов одного класса объединяются в один список без дублей,
+ * в порядке появления диапазонов в запросе. Дедупликация — по номеру строки.
  * Каждая строка имеет префикс номера: {@code "19: public void foo() {")}.
- * Порядок элементов соответствует порядку элементов {@code rows} запроса.
  */
 @Schema(description = "Строки исходного кода")
 public record SourceLinesResponse(
@@ -24,7 +24,7 @@ public record SourceLinesResponse(
      *
      * @param filePath qualified name или путь к файлу
      * @param error    сообщение об ошибке ({@code null} при успехе)
-     * @param snippets список диапазонов; каждый диапазон — список строк с префиксом номера.
+     * @param snippets строки всех запрошенных диапазонов, дедуплицированные по номеру строки.
      *                 {@code null} при ошибке.
      */
     @Schema(description = "Результат для одного класса")
@@ -38,20 +38,18 @@ public record SourceLinesResponse(
             String error,
 
             @Schema(
-                    description = "Сниппеты по диапазонам в порядке rows. "
-                            + "Каждый элемент — список строк одного диапазона с префиксом номера. "
-                            + "null при ошибке.",
-                    example = "[[\"28: public class T6546\", \"29:     private static Документы окно\"], "
-                            + "[\"40: public void t6546(...)\"]]"
+                    description = "Строки всех диапазонов, дедуплицированные по номеру строки. "
+                            + "Каждая строка — \"N: <content>\". null при ошибке.",
+                    example = "[\"28: public class T6546\", \"29:     private static Документы окно\", \"40: public void t6546(...)\"]"
             )
-            List<List<String>> snippets
+            List<String> snippets
     ) {
 
         public static FileResult ofError(String filePath, String error) {
             return new FileResult(filePath, error, null);
         }
 
-        public static FileResult ofSnippets(String filePath, List<List<String>> snippets) {
+        public static FileResult ofSnippets(String filePath, List<String> snippets) {
             return new FileResult(filePath, null, snippets);
         }
     }

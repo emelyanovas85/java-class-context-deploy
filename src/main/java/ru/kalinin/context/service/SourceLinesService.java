@@ -14,17 +14,19 @@ import ru.kalinin.context.model.SourceLinesResponse.FileResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.SequencedSet;
 
 /**
  * Получает строки исходного кода из GitLab или из локального {@code sources.jar}.
  *
  * <p>Формат диапазона — тот же, что в {@code StructureNode.rows()}:
  * {@code "17"} (одна строка) или {@code "19-22"} (включительно).
- * Каждый диапазон возвращается отдельным списком строк с префиксом номера
- * ({@code "19: public void foo() {"}).
+ * Строки всех диапазонов объединяются, дедуплицируются по номеру строки
+ * и отдаются одним списком с префиксом номера строки.
  */
 @Slf4j
 @Service
@@ -150,22 +152,34 @@ public class SourceLinesService {
 
     // ── Общая логика ──────────────────────────────────────────────────────
 
+    /**
+     * Собирает строки всех диапазонов в один список.
+     * Номера строк дедуплицируются через {@link LinkedHashSet} — порядок появления сохраняется.
+     */
     private FileResult toFileResult(String label, String content, List<String> rows) {
         String[] lines = content.split("\n", -1);
-        List<List<String>> snippets = rows.stream()
-                .map(rowSpec -> extractSnippet(lines, rowSpec))
-                .toList();
+
+        SequencedSet<Integer> lineNumbers = new LinkedHashSet<>();
+        for (String rowSpec : rows) {
+            collectLineNumbers(lineNumbers, lines.length, rowSpec);
+        }
+
+        List<String> snippets = new ArrayList<>(lineNumbers.size());
+        for (int n : lineNumbers) {
+            snippets.add(n + ": " + lines[n - 1]);
+        }
         return FileResult.ofSnippets(label, snippets);
     }
 
     /**
-     * Извлекает строки диапазона в виде списка; каждая строка — {@code "N: <content>"}.
+     * Добавляет номера строк диапазона в переданный set (1-based, включительно).
+     * Номера за границами файла молча отбрасываются.
      *
-     * @param lines   0-based массив строк файла
-     * @param rowSpec диапазон {@code "17"} или {@code "19-22"} (1-based, включительно)
-     * @return список строк диапазона; при ошибке — список с одним сообщением-комментарием
+     * @param dest      приёмник номеров строк
+     * @param fileLines количество строк в файле
+     * @param rowSpec   диапазон {@code "17"} или {@code "19-22"}
      */
-    static List<String> extractSnippet(String[] lines, String rowSpec) {
+    static void collectLineNumbers(SequencedSet<Integer> dest, int fileLines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
         try {
@@ -177,20 +191,19 @@ public class SourceLinesService {
             }
         } catch (NumberFormatException e) {
             log.warn("Invalid row spec '{}': {}", rowSpec, e.getMessage());
-            return List.of("// invalid row spec: " + rowSpec);
+            return;
         }
 
         int clampedFrom = Math.max(1, from);
-        int clampedTo   = Math.min(lines.length, to);
+        int clampedTo   = Math.min(fileLines, to);
 
         if (clampedFrom > clampedTo) {
-            return List.of("// lines " + rowSpec + " out of range (file has " + lines.length + " lines)");
+            log.warn("Row spec '{}' out of range (file has {} lines)", rowSpec, fileLines);
+            return;
         }
 
-        List<String> result = new ArrayList<>(clampedTo - clampedFrom + 1);
         for (int i = clampedFrom; i <= clampedTo; i++) {
-            result.add(i + ": " + lines[i - 1]);
+            dest.add(i);
         }
-        return result;
     }
 }
