@@ -13,12 +13,8 @@ import ru.kalinin.context.model.SourceLinesResponse.FileResult;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.*;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.SequencedSet;
 
 /**
  * Получает строки исходного кода из GitLab или из локального {@code sources.jar}.
@@ -154,20 +150,20 @@ public class SourceLinesService {
 
     /**
      * Собирает строки всех диапазонов в один список.
-     * Номера строк дедуплицируются через {@link LinkedHashSet} — порядок появления сохраняется.
+     * Номера строк дедуплицируются через {@link Set} — порядок появления сохраняется.
      */
     private FileResult toFileResult(String label, String content, List<String> rows) {
         String[] lines = content.split("\n", -1);
 
-        SequencedSet<Integer> lineNumbers = new LinkedHashSet<>();
+        Set<Integer> lineNumbers = new HashSet<>();
         for (String rowSpec : rows) {
             collectLineNumbers(lineNumbers, lines.length, rowSpec);
         }
 
         List<String> snippets = new ArrayList<>(lineNumbers.size());
-        for (int n : lineNumbers) {
-            snippets.add(n + ": " + lines[n - 1]);
-        }
+        lineNumbers.stream()
+                .sorted()
+                .forEach(n -> snippets.add(n + ": " + lines[n - 1]));
         return FileResult.ofSnippets(label, snippets);
     }
 
@@ -179,7 +175,7 @@ public class SourceLinesService {
      * @param fileLines количество строк в файле
      * @param rowSpec   диапазон {@code "17"} или {@code "19-22"}
      */
-    static void collectLineNumbers(SequencedSet<Integer> dest, int fileLines, String rowSpec) {
+    static void collectLineNumbers(Set<Integer> dest, int fileLines, String rowSpec) {
         int dash = rowSpec.indexOf('-');
         int from, to;
         try {

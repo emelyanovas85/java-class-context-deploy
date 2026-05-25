@@ -30,7 +30,7 @@ public record ModifiedClassContext(
         sb.append(header).append('\n');
         if (structureSource != null) {
             sb.append("#### [branch=source]\n");
-            sb.append(StructureNodePrinter.render(structureSource, 0));
+            sb.append(StructureNodePrinter.render(structureSource, 0)).append("\n");
         }
         if (structureTarget != null) {
             sb.append("#### [branch=target]\n");
