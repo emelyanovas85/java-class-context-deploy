@@ -21,7 +21,8 @@ import java.util.zip.ZipInputStream;
  * {@code com/example/Foo.java} → {@code com.example.Foo}.
  *
  * <p>Вложенные классы в индекс не попадают — только top-level.
- * Они всегда находятся в файле своего top-level-контейнера.
+ * При запросе по имени вложенного класса (e.g. {@code userInterface.ComplexTable.Row})
+ * {@link #extractSourceFile} автоматически ищет файл родительского класса.
  */
 @Slf4j
 @Component
@@ -58,21 +59,33 @@ public class DependencyClassNameExtractor {
      * Читает jar с диска и возвращает содержимое {@code .java}-файла
      * для указанного qualified name.
      *
+     * <p>Если файл не найден напрямую, метод последовательно отрезает последний
+     * сегмент через {@code .}, пытаясь найти родительский top-level класс.
+     * Например:
+     * <pre>
+     *   userInterface.ComplexTable.Row  →  userInterface/ComplexTable/Row.java  (не найден)
+     *                                  →  userInterface/ComplexTable.java       (найден)
+     * </pre>
+     *
      * @param jarPath       путь к jar-файлу на диске
      * @param qualifiedName например {@code org.springframework.web.bind.annotation.RestController}
+     *                      или {@code userInterface.ComplexTable.Row}
      * @return содержимое .java файла или {@code Optional.empty()} если не найдено
      */
     public Optional<String> extractSourceFile(Path jarPath, String qualifiedName) {
-        String targetEntry = qualifiedName.replace('.', '/') + ".java";
-        try (ZipInputStream zip = openZip(jarPath)) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                if (!entry.isDirectory() && entry.getName().equals(targetEntry)) {
-                    return Optional.of(new String(zip.readAllBytes()));
+        String candidate = qualifiedName;
+        while (!candidate.isEmpty()) {
+            String targetEntry = candidate.replace('.', '/') + ".java";
+            Optional<String> result = readEntry(jarPath, targetEntry);
+            if (result.isPresent()) {
+                if (!candidate.equals(qualifiedName)) {
+                    log.debug("Resolved nested class {} via outer class file {}", qualifiedName, targetEntry);
                 }
+                return result;
             }
-        } catch (IOException e) {
-            log.warn("Failed to read sources.jar while looking for {}: {}", qualifiedName, e.getMessage());
+            int lastDot = candidate.lastIndexOf('.');
+            if (lastDot < 0) break;
+            candidate = candidate.substring(0, lastDot);
         }
         return Optional.empty();
     }
@@ -81,9 +94,22 @@ public class DependencyClassNameExtractor {
     // Helpers
     // -------------------------------------------------------------------------
 
+    private Optional<String> readEntry(Path jarPath, String targetEntry) {
+        try (ZipInputStream zip = openZip(jarPath)) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName().equals(targetEntry)) {
+                    return Optional.of(new String(zip.readAllBytes()));
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Failed to read sources.jar while looking for {}: {}", targetEntry, e.getMessage());
+        }
+        return Optional.empty();
+    }
+
     private ZipInputStream openZip(Path jarPath) throws IOException {
-        InputStream is = Files.newInputStream(jarPath);
-        return new ZipInputStream(is);
+        return new ZipInputStream(Files.newInputStream(jarPath));
     }
 
     /**
