@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
  *   <li>Уровни 1..depth: волновой BFS — все типы волны fetch+parse+map параллельно;
  *       merge и формирование следующей волны — однопоточно.</li>
  *   <li>Финальный пасс: аналогично, параллельно
- *       по нерезолвненным типам.</li>
+ *       по нерезолвленным типам.</li>
  * </ol>
  *
  * <h3>Thread safety</h3>
@@ -72,7 +72,7 @@ public class ContextBuilderService {
         this.ioExecutor = ioExecutor;
     }
 
-    // ── records ────────────────────────────────────────────────────────────────────
+    // ── records ───────────────────────────────────────────────────────────────
 
     private record Level0Result(
             String filePath,
@@ -92,7 +92,7 @@ public class ContextBuilderService {
             int depth
     ) {}
 
-    // ── buildContext ─────────────────────────────────────────────────────────────────
+    // ── buildContext ──────────────────────────────────────────────────────────
 
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
@@ -129,7 +129,7 @@ public class ContextBuilderService {
         AtomicInteger totalResolved  = new AtomicInteger(0);
         AtomicInteger totalSkipped   = new AtomicInteger(0);
 
-        // ── Уровень 0 ─────────────────────────────────────────────────────────────────
+        // ── Уровень 0 ─────────────────────────────────────────────────────────
         List<CompletableFuture<Level0Result>> level0Futures = mrInfo.changedFiles().stream()
                 .map(filePath -> CompletableFuture.supplyAsync(() -> {
                     log.debug("Level 0 [parallel]: fetch+parse {}", filePath);
@@ -166,14 +166,15 @@ public class ContextBuilderService {
                     int id = idCounter.getAndIncrement();
                     qNameToId.put(cs.qualifiedName(), id);
                     level0.add(cs);
-                    addNestedQNames(cs, processedQNames);
                     allContexts.add(ClassContext.of(
                             id, Set.of(), cs.qualifiedName(), 0, src0, r.srcNodes(), r.tgtNodes()));
+                    registerNestedClasses(cs, 0, src0, r.srcNodes(), r.tgtNodes(),
+                            processedQNames, qNameToId, idCounter, allContexts, level0);
                 }
             }
         }
 
-        // ── Уровни 1..depth ─────────────────────────────────────────────────────────────
+        // ── Уровни 1..depth ───────────────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         List<ClassStructure> allParsed = new ArrayList<>(level0);
 
@@ -208,10 +209,11 @@ public class ContextBuilderService {
                         int id = idCounter.getAndIncrement();
                         qNameToId.put(cs.qualifiedName(), id);
                         nextLevel.add(cs);
-                        addNestedQNames(cs, processedQNames);
                         allContexts.add(ClassContext.of(
                                 id, r.callerIds(), cs.qualifiedName(),
                                 r.depth(), r.source(), r.nodes(), r.nodes()));
+                        registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
+                                processedQNames, qNameToId, idCounter, allContexts, nextLevel);
                     }
                 }
             }
@@ -220,7 +222,7 @@ public class ContextBuilderService {
             currentLevel = nextLevel;
         }
 
-        // ── Финальный пасс ─────────────────────────────────────────────────────────────
+        // ── Финальный пасс ────────────────────────────────────────────────────
         Set<String> enrichedQNames = new LinkedHashSet<>(processedQNames);
         collectRawRefs(allParsed).stream()
                 .filter(ref -> !ref.isUnresolved())
@@ -256,17 +258,18 @@ public class ContextBuilderService {
                         int id = idCounter.getAndIncrement();
                         qNameToId.put(cs.qualifiedName(), id);
                         finalLevel.add(cs);
-                        addNestedQNames(cs, processedQNames);
                         allContexts.add(ClassContext.of(
                                 id, r.callerIds(), cs.qualifiedName(),
                                 r.depth(), r.source(), r.nodes(), r.nodes()));
+                        registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
+                                processedQNames, qNameToId, idCounter, allContexts, finalLevel);
                     }
                 }
             }
             allParsed.addAll(finalLevel);
         }
 
-        // ── Summary + нерезолвненные ────────────────────────────────────────────────
+        // ── Summary + нерезолвленные ──────────────────────────────────────────
         if (log.isInfoEnabled()) {
             int req  = totalRequested.get();
             int res  = totalResolved.get();
@@ -294,7 +297,45 @@ public class ContextBuilderService {
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
-    // ── fetchAndParse ────────────────────────────────────────────────────────────────
+    // ── registerNestedClasses ─────────────────────────────────────────────────
+
+    /**
+     * Регистрирует все вложенные классы {@code cs} как полноценные {@link ClassContext}
+     * с тем же {@code depth} и {@code source}, что и родительский класс.
+     * Каждый nested класс добавляется в {@code nextLevel}, чтобы его собственные
+     * ссылки участвовали в следующей волне BFS.
+     * Рекурсивно обрабатывает вложенные вложенных.
+     */
+    private void registerNestedClasses(
+            ClassStructure cs,
+            int depth,
+            String source,
+            List<StructureNode> srcNodes,
+            List<StructureNode> tgtNodes,
+            Set<String> processedQNames,
+            Map<String, Integer> qNameToId,
+            AtomicInteger idCounter,
+            List<ClassContext> allContexts,
+            List<ClassStructure> nextLevel) {
+
+        for (ClassStructure nested : cs.nestedClasses()) {
+            if (processedQNames.add(nested.qualifiedName())) {
+                int id = idCounter.getAndIncrement();
+                qNameToId.put(nested.qualifiedName(), id);
+                nextLevel.add(nested);
+                allContexts.add(ClassContext.of(
+                        id, Set.of(), nested.qualifiedName(),
+                        depth, source, srcNodes, tgtNodes));
+                log.debug("Registered nested class '{}' at depth {}",
+                        nested.qualifiedName(), depth);
+                // рекурсия для вложенных вложенных
+                registerNestedClasses(nested, depth, source, srcNodes, tgtNodes,
+                        processedQNames, qNameToId, idCounter, allContexts, nextLevel);
+            }
+        }
+    }
+
+    // ── fetchAndParse ─────────────────────────────────────────────────────────
 
     private DepthResult fetchAndParse(
             String qName,
@@ -351,7 +392,7 @@ public class ContextBuilderService {
         return null;
     }
 
-    // ── awaitAll ────────────────────────────────────────────────────────────────────
+    // ── awaitAll ──────────────────────────────────────────────────────────────
 
     private <T> List<T> awaitAll(List<CompletableFuture<T>> futures) {
         List<T> results = new ArrayList<>(futures.size());
@@ -369,7 +410,7 @@ public class ContextBuilderService {
         return results;
     }
 
-    // ── Source label helpers ──────────────────────────────────────────────────────────
+    // ── Source label helpers ──────────────────────────────────────────────────
 
     private static String repoSource(String filePath) {
         return filePath.startsWith("src/test/") ? "src/test" : "src/main";
@@ -381,7 +422,7 @@ public class ContextBuilderService {
         return coord != null ? coord.toString() : fileName;
     }
 
-    // ── Repo source lookup ──────────────────────────────────────────────────────────
+    // ── Repo source lookup ────────────────────────────────────────────────────
 
     private Optional<Map.Entry<String, String>> findRepoSourceForType(
             String qName,
@@ -415,7 +456,7 @@ public class ContextBuilderService {
                         .map(content -> Map.entry(filePath, content)));
     }
 
-    // ── Wildcard resolver ───────────────────────────────────────────────────────────
+    // ── Wildcard resolver ─────────────────────────────────────────────────────
 
     private BiFunction<String, List<String>, Optional<String>> buildWildcardResolver(
             Map<String, List<String>> fileIndex,
@@ -459,7 +500,7 @@ public class ContextBuilderService {
         return dirPath.replace('/', '.');
     }
 
-    // ── collectRawRefs / collectRefToCallerIds / resolveRef ─────────────────────
+    // ── collectRawRefs / collectRefToCallerIds / resolveRef ───────────────────
 
     private Set<UnresolvedTypeRef> collectRawRefs(List<ClassStructure> classes) {
         Set<UnresolvedTypeRef> refs = new LinkedHashSet<>();
@@ -504,14 +545,5 @@ public class ContextBuilderService {
         if (candidates.size() > 1)
             log.warn("Ambiguous post-resolution for '{}': candidates={}", simpleName, candidates);
         return simpleName;
-    }
-
-    // ── Misc ─────────────────────────────────────────────────────────────────────
-
-    private void addNestedQNames(ClassStructure cs, Set<String> processed) {
-        cs.nestedClasses().forEach(nc -> {
-            processed.add(nc.qualifiedName());
-            addNestedQNames(nc, processed);
-        });
     }
 }
