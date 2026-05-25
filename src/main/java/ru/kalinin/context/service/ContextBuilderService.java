@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
  *   <li>Уровни 1..depth: волновой BFS — все типы волны fetch+parse+map параллельно;
  *       merge и формирование следующей волны — однопоточно.</li>
  *   <li>Финальный пасс: аналогично, параллельно
- *       по нерезолвленным типам.</li>
+ *       по нерезолвненным типам.</li>
  * </ol>
  *
  * <h3>Thread safety</h3>
@@ -72,9 +72,8 @@ public class ContextBuilderService {
         this.ioExecutor = ioExecutor;
     }
 
-    // ── records ────────────────────────────────────────────────────────────────
+    // ── records ────────────────────────────────────────────────────────────────────
 
-    /** Полный результат обработки одного файла уровня 0. */
     private record Level0Result(
             String filePath,
             Optional<String> sourceContent,
@@ -84,17 +83,6 @@ public class ContextBuilderService {
             List<StructureNode> tgtNodes
     ) {}
 
-    /**
-     * Результат обработки одного типа на глубине 1..N / final pass.
-     * Задача читает исходник и парсит его; merge выполняется в главном потоке.
-     *
-     * @param qName     целевой qualified name (исходный запрос)
-     * @param callerIds id классов, ссылающихся на этот тип
-     * @param parsed    парсер файла (0..N ClassStructure)
-     * @param nodes     StructureNode-дерево файла
-     * @param source    метка источника ("src/main", "com.example:lib:1.0", ...)
-     * @param depth     глубина
-     */
     private record DepthResult(
             String qName,
             Set<Integer> callerIds,
@@ -104,7 +92,7 @@ public class ContextBuilderService {
             int depth
     ) {}
 
-    // ── buildContext ───────────────────────────────────────────────────────────
+    // ── buildContext ─────────────────────────────────────────────────────────────────
 
     public ContextResponse buildContext(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
@@ -136,7 +124,12 @@ public class ContextBuilderService {
         Map<String, Integer> qNameToId = new LinkedHashMap<>();
         AtomicInteger idCounter = new AtomicInteger(1);
 
-        // ── Уровень 0: параллельные fetch + parse + map ────────────────────────
+        // Счётчики для summary-лога
+        AtomicInteger totalRequested = new AtomicInteger(0);
+        AtomicInteger totalResolved  = new AtomicInteger(0);
+        AtomicInteger totalSkipped   = new AtomicInteger(0);
+
+        // ── Уровень 0 ─────────────────────────────────────────────────────────────────
         List<CompletableFuture<Level0Result>> level0Futures = mrInfo.changedFiles().stream()
                 .map(filePath -> CompletableFuture.supplyAsync(() -> {
                     log.debug("Level 0 [parallel]: fetch+parse {}", filePath);
@@ -180,7 +173,7 @@ public class ContextBuilderService {
             }
         }
 
-        // ── Уровни 1..depth: волновой BFS ──────────────────────────────────────────
+        // ── Уровни 1..depth ─────────────────────────────────────────────────────────────
         List<ClassStructure> currentLevel = level0;
         List<ClassStructure> allParsed = new ArrayList<>(level0);
 
@@ -193,9 +186,6 @@ public class ContextBuilderService {
             if (wave.isEmpty()) break;
 
             log.debug("Depth {}: resolving {} types in parallel", depth, wave.size());
-
-            // Добавляем всю волну в processedQNames до запуска future —
-            // чтобы разные задачи не пытались обрабатывать один тип дважды.
             processedQNames.addAll(wave);
 
             final int currentDepth = depth;
@@ -204,7 +194,8 @@ public class ContextBuilderService {
                             () -> fetchAndParse(qName,
                                     refToCallerIds.getOrDefault(qName, Set.of()),
                                     fileIndex, dependencySources, wildcardResolver,
-                                    request, sourceBranch, currentDepth),
+                                    request, sourceBranch, currentDepth,
+                                    totalRequested, totalResolved, totalSkipped),
                             ioExecutor))
                     .toList();
 
@@ -212,8 +203,6 @@ public class ContextBuilderService {
             for (DepthResult r : awaitAll(futures)) {
                 if (r == null || r.parsed().isEmpty()) continue;
                 for (ClassStructure cs : r.parsed()) {
-                    // processedQNames уже содержит qName волны;
-                    // nested классы добавляем здесь
                     if (processedQNames.add(cs.qualifiedName()) ||
                             cs.qualifiedName().equals(r.qName())) {
                         int id = idCounter.getAndIncrement();
@@ -231,7 +220,7 @@ public class ContextBuilderService {
             currentLevel = nextLevel;
         }
 
-        // ── Финальный пасс ─────────────────────────────────────────────────────
+        // ── Финальный пасс ─────────────────────────────────────────────────────────────
         Set<String> enrichedQNames = new LinkedHashSet<>(processedQNames);
         collectRawRefs(allParsed).stream()
                 .filter(ref -> !ref.isUnresolved())
@@ -253,7 +242,8 @@ public class ContextBuilderService {
                             () -> fetchAndParse(qName,
                                     finalRefToCallerIds.getOrDefault(qName, Set.of()),
                                     fileIndex, dependencySources, wildcardResolver,
-                                    request, sourceBranch, request.depth()),
+                                    request, sourceBranch, request.depth(),
+                                    totalRequested, totalResolved, totalSkipped),
                             ioExecutor))
                     .toList();
 
@@ -276,8 +266,14 @@ public class ContextBuilderService {
             allParsed.addAll(finalLevel);
         }
 
-        // ── Отчёт о нерезолвленных ──────────────────────────────────────────
+        // ── Summary + нерезолвненные ────────────────────────────────────────────────
         if (log.isInfoEnabled()) {
+            int req  = totalRequested.get();
+            int res  = totalResolved.get();
+            int skip = totalSkipped.get();
+            log.info("Type resolution summary: {} requested, {} resolved, {} skipped",
+                    req, res, skip);
+
             Set<String> allKnown = new LinkedHashSet<>(processedQNames);
             collectRawRefs(allParsed).stream()
                     .filter(ref -> !ref.isUnresolved())
@@ -298,15 +294,8 @@ public class ContextBuilderService {
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
-    // ── Атомарная единица работы: fetch + parse + map для одного типа ─────────────
+    // ── fetchAndParse ────────────────────────────────────────────────────────────────
 
-    /**
-     * Читает исходник для {@code qName} из repo или jar, парсит, строит StructureNode.
-     * Вызывается из {@code ioExecutor} — все обращения к общим мутабельным
-     * коллекциям отсутствуют.
-     *
-     * @return {@link DepthResult} или {@code null} если источник не найден
-     */
     private DepthResult fetchAndParse(
             String qName,
             Set<Integer> callerIds,
@@ -315,7 +304,12 @@ public class ContextBuilderService {
             BiFunction<String, List<String>, Optional<String>> wildcardResolver,
             ContextRequest request,
             String sourceBranch,
-            int depth) {
+            int depth,
+            AtomicInteger totalRequested,
+            AtomicInteger totalResolved,
+            AtomicInteger totalSkipped) {
+
+        totalRequested.incrementAndGet();
 
         // 1. Поиск в repo
         Optional<Map.Entry<String, String>> repoOpt =
@@ -323,6 +317,7 @@ public class ContextBuilderService {
                         request.gitlabUrl(), request.token(),
                         request.projectId(), sourceBranch);
         if (repoOpt.isPresent()) {
+            totalResolved.incrementAndGet();
             String filePath = repoOpt.get().getKey();
             String content  = repoOpt.get().getValue();
             return new DepthResult(
@@ -338,6 +333,7 @@ public class ContextBuilderService {
         if (jarPath != null) {
             Optional<String> contentOpt = classNameExtractor.extractSourceFile(jarPath, qName);
             if (contentOpt.isPresent()) {
+                totalResolved.incrementAndGet();
                 String content       = contentOpt.get();
                 String syntheticPath = qName.replace('.', '/') + ".java";
                 log.debug("Resolved '{}' from sources.jar ({})", qName, jarSource(jarPath));
@@ -350,11 +346,12 @@ public class ContextBuilderService {
             }
         }
 
+        totalSkipped.incrementAndGet();
         log.debug("Type '{}' not found in repo or dependency sources — skipping", qName);
         return null;
     }
 
-    // ── Ожидание всех future с проверкой ошибок ─────────────────────────────
+    // ── awaitAll ────────────────────────────────────────────────────────────────────
 
     private <T> List<T> awaitAll(List<CompletableFuture<T>> futures) {
         List<T> results = new ArrayList<>(futures.size());
@@ -372,7 +369,7 @@ public class ContextBuilderService {
         return results;
     }
 
-    // ── Source label helpers ────────────────────────────────────────────────
+    // ── Source label helpers ──────────────────────────────────────────────────────────
 
     private static String repoSource(String filePath) {
         return filePath.startsWith("src/test/") ? "src/test" : "src/main";
@@ -384,13 +381,8 @@ public class ContextBuilderService {
         return coord != null ? coord.toString() : fileName;
     }
 
-    // ── Repo source lookup ───────────────────────────────────────────────────
+    // ── Repo source lookup ──────────────────────────────────────────────────────────
 
-    /**
-     * Ищет исходник для типа: сначала точный поиск, затем
-     * последовательное откусывание сегментов (для Outer.Inner).
-     * <p>Безопасен для параллельного вызова (не изменяет общее состояние).
-     */
     private Optional<Map.Entry<String, String>> findRepoSourceForType(
             String qName,
             Map<String, List<String>> fileIndex,
@@ -423,7 +415,7 @@ public class ContextBuilderService {
                         .map(content -> Map.entry(filePath, content)));
     }
 
-    // ── Wildcard resolver ───────────────────────────────────────────────────
+    // ── Wildcard resolver ───────────────────────────────────────────────────────────
 
     private BiFunction<String, List<String>, Optional<String>> buildWildcardResolver(
             Map<String, List<String>> fileIndex,
@@ -467,7 +459,7 @@ public class ContextBuilderService {
         return dirPath.replace('/', '.');
     }
 
-    // ── collectRawRefs / collectRefToCallerIds / resolveRef ─────────────────
+    // ── collectRawRefs / collectRefToCallerIds / resolveRef ─────────────────────
 
     private Set<UnresolvedTypeRef> collectRawRefs(List<ClassStructure> classes) {
         Set<UnresolvedTypeRef> refs = new LinkedHashSet<>();
@@ -514,7 +506,7 @@ public class ContextBuilderService {
         return simpleName;
     }
 
-    // ── Misc ───────────────────────────────────────────────────────────────
+    // ── Misc ─────────────────────────────────────────────────────────────────────
 
     private void addNestedQNames(ClassStructure cs, Set<String> processed) {
         cs.nestedClasses().forEach(nc -> {
