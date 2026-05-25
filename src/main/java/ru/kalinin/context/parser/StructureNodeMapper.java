@@ -11,6 +11,7 @@ import ru.kalinin.context.model.StructureNode;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Преобразует Java-исходник в список {@link StructureNode} верхнего уровня.
@@ -52,6 +53,45 @@ public class StructureNodeMapper {
             nodes.add(mapType(type));
         }
         return nodes;
+    }
+
+    /**
+     * Рекурсивно ищет в дереве {@code nodes} узел типа class/interface/enum/record/annotation,
+     * чья сигнатура содержит простое имя {@code simpleName} как отдельное слово.
+     * Возвращает найденный узел как одноэлементный список, либо пустой список.
+     *
+     * <p>Используется для извлечения поддерева nested-класса из дерева родительского файла,
+     * чтобы {@link ru.kalinin.context.model.ClassContext} nested-класса содержал только
+     * его собственные строки, а не весь файл.
+     *
+     * @param nodes      узлы для поиска (обычно результат {@link #map})
+     * @param simpleName простое имя вложенного класса (например {@code "Row"})
+     * @return список из одного узла или пустой список
+     */
+    public List<StructureNode> findNestedTypeNodes(List<StructureNode> nodes, String simpleName) {
+        if (nodes == null) return List.of();
+        Pattern namePattern = Pattern.compile("\\b" + Pattern.quote(simpleName) + "\\b");
+        return findNestedTypeNodes(nodes, namePattern);
+    }
+
+    private List<StructureNode> findNestedTypeNodes(List<StructureNode> nodes, Pattern namePattern) {
+        for (StructureNode node : nodes) {
+            if (isTypeNode(node) && namePattern.matcher(node.signature()).find()) {
+                return List.of(node);
+            }
+            if (node.children() != null) {
+                List<StructureNode> found = findNestedTypeNodes(node.children(), namePattern);
+                if (!found.isEmpty()) return found;
+            }
+        }
+        return List.of();
+    }
+
+    private static boolean isTypeNode(StructureNode node) {
+        return switch (node.type()) {
+            case "class", "interface", "enum", "record", "annotation" -> true;
+            default -> false;
+        };
     }
 
     // ── type dispatch ──────────────────────────────────────────────────────
