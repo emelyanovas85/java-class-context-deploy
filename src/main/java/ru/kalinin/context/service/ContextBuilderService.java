@@ -201,7 +201,7 @@ public class ContextBuilderService {
                     .toList();
 
             List<ClassStructure> nextLevel = new ArrayList<>();
-            for (DepthResult r : awaitAll(futures)) {
+            for (DepthResult r : mergeResults(awaitAll(futures))) {
                 if (r == null || r.parsed().isEmpty()) continue;
                 for (ClassStructure cs : r.parsed()) {
                     if (processedQNames.add(cs.qualifiedName()) ||
@@ -250,7 +250,7 @@ public class ContextBuilderService {
                     .toList();
 
             List<ClassStructure> finalLevel = new ArrayList<>();
-            for (DepthResult r : awaitAll(finalFutures)) {
+            for (DepthResult r : mergeResults(awaitAll(finalFutures))) {
                 if (r == null || r.parsed().isEmpty()) continue;
                 for (ClassStructure cs : r.parsed()) {
                     if (processedQNames.add(cs.qualifiedName()) ||
@@ -297,6 +297,48 @@ public class ContextBuilderService {
         return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
     }
 
+    // ── mergeResults ────────────────────────────────────────────────────────────────
+
+    /**
+     * Схлопывает результаты волны с одинаковым резолведшимся классом.
+     *
+     * <p>Это возникает когда несколько разных запросов ({@code qName}) волны
+     * резолвировались в один и тот же outer класс (например,
+     * {@code userInterface.ComplexTable.Row} и {@code userInterface.ComplexTable}
+     * оба резолвировались в {@code ComplexTable.java}).
+     * В таком случае результаты имеют одинаковый набор parsed-классов,
+     * но разные {@code callerIds}. Метод объединяет все {@code callerIds}
+     * в одном {@link DepthResult}, оставляя остальные поля без изменений.
+     *
+     * <p>Группировка по ключу {@code (parsed класс + source)} гарантирует,
+     * что не будет смешивания callerIds от разных файлов.
+     */
+    private List<DepthResult> mergeResults(List<DepthResult> raw) {
+        // Ключ: имя первого parsed-класса + source (оба пришли из одного файла)
+        record Key(String topClassName, String source) {}
+
+        Map<Key, DepthResult> merged = new LinkedHashMap<>();
+        for (DepthResult r : raw) {
+            if (r == null || r.parsed().isEmpty()) continue;
+            Key key = new Key(r.parsed().get(0).qualifiedName(), r.source());
+            DepthResult existing = merged.get(key);
+            if (existing == null) {
+                merged.put(key, r);
+            } else {
+                // Объединяем callerIds, остальное берём из первого результата
+                Set<Integer> combined = new LinkedHashSet<>(existing.callerIds());
+                combined.addAll(r.callerIds());
+                merged.put(key, new DepthResult(
+                        existing.qName(), combined,
+                        existing.parsed(), existing.nodes(),
+                        existing.source(), existing.depth()));
+                log.debug("Merged callerIds for '{}': {} + {} = {}",
+                        key.topClassName(), existing.callerIds(), r.callerIds(), combined);
+            }
+        }
+        return new ArrayList<>(merged.values());
+    }
+
     // ── registerNestedClasses ─────────────────────────────────────────────────────
 
     /**
@@ -326,7 +368,6 @@ public class ContextBuilderService {
                 qNameToId.put(nested.qualifiedName(), id);
                 nextLevel.add(nested);
 
-                // Извлекаем поддерево только для этого nested класса
                 String simpleName = nested.simpleName();
                 List<StructureNode> nestedSrcNodes = nodeMapper.findNestedTypeNodes(srcNodes, simpleName);
                 List<StructureNode> nestedTgtNodes = tgtNodes != null
@@ -338,7 +379,6 @@ public class ContextBuilderService {
                         depth, source, nestedSrcNodes, nestedTgtNodes));
                 log.debug("Registered nested class '{}' at depth {}", nested.qualifiedName(), depth);
 
-                // Рекурсия для вложенных вложенных
                 registerNestedClasses(nested, depth, source, nestedSrcNodes, nestedTgtNodes,
                         processedQNames, qNameToId, idCounter, allContexts, nextLevel);
             }
