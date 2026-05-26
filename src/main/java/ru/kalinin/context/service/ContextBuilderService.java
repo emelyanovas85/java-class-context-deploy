@@ -362,7 +362,7 @@ public class ContextBuilderService {
 
         totalRequested.incrementAndGet();
 
-        // 1. Поиск в repo
+        // 1. Поиск в repo (с подъёмом по outer классам — уже внутри findRepoSourceForType)
         Optional<Map.Entry<String, String>> repoOpt =
                 findRepoSourceForType(qName, fileIndex,
                         request.gitlabUrl(), request.token(),
@@ -379,22 +379,34 @@ public class ContextBuilderService {
                     depth);
         }
 
-        // 2. Поиск в jar
-        Path jarPath = dependencySources.get(qName);
-        if (jarPath != null) {
-            Optional<String> contentOpt = classNameExtractor.extractSourceFile(jarPath, qName);
-            if (contentOpt.isPresent()) {
-                totalResolved.incrementAndGet();
-                String content       = contentOpt.get();
-                String syntheticPath = qName.replace('.', '/') + ".java";
-                log.debug("Resolved '{}' from sources.jar ({})", qName, jarSource(jarPath));
-                return new DepthResult(
-                        qName, callerIds,
-                        structureParser.parse(content, syntheticPath, depth, wildcardResolver),
-                        nodeMapper.map(content, syntheticPath),
-                        jarSource(jarPath),
-                        depth);
+        // 2. Поиск в jar — с подъёмом по outer классам
+        //    Например: userInterface.ComplexTable.Row → userInterface.ComplexTable
+        String jarCandidate = qName;
+        while (!jarCandidate.isEmpty()) {
+            Path jarPath = dependencySources.get(jarCandidate);
+            if (jarPath != null) {
+                Optional<String> contentOpt = classNameExtractor.extractSourceFile(jarPath, jarCandidate);
+                if (contentOpt.isPresent()) {
+                    totalResolved.incrementAndGet();
+                    String content       = contentOpt.get();
+                    String syntheticPath = jarCandidate.replace('.', '/') + ".java";
+                    if (!jarCandidate.equals(qName)) {
+                        log.debug("Type '{}' resolved via outer class '{}' from sources.jar ({})",
+                                qName, jarCandidate, jarSource(jarPath));
+                    } else {
+                        log.debug("Resolved '{}' from sources.jar ({})", qName, jarSource(jarPath));
+                    }
+                    return new DepthResult(
+                            qName, callerIds,
+                            structureParser.parse(content, syntheticPath, depth, wildcardResolver),
+                            nodeMapper.map(content, syntheticPath),
+                            jarSource(jarPath),
+                            depth);
+                }
             }
+            int lastDot = jarCandidate.lastIndexOf('.');
+            if (lastDot < 0) break;
+            jarCandidate = jarCandidate.substring(0, lastDot);
         }
 
         totalSkipped.incrementAndGet();
