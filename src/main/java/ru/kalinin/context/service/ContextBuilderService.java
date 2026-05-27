@@ -169,7 +169,7 @@ public class ContextBuilderService {
                     allContexts.add(ClassContext.of(
                             id, Set.of(), cs.qualifiedName(), 0, src0, r.srcNodes(), r.tgtNodes()));
                     registerNestedClasses(cs, 0, src0, r.srcNodes(), r.tgtNodes(),
-                            processedQNames, qNameToId, idCounter, allContexts, level0);
+                            processedQNames, qNameToId, idCounter, allContexts, level0, id);
                 }
             }
         }
@@ -202,20 +202,7 @@ public class ContextBuilderService {
 
             List<ClassStructure> nextLevel = new ArrayList<>();
             for (DepthResult r : mergeResults(awaitAll(futures))) {
-                if (r == null || r.parsed().isEmpty()) continue;
-                for (ClassStructure cs : r.parsed()) {
-                    if (processedQNames.add(cs.qualifiedName()) ||
-                            cs.qualifiedName().equals(r.qName())) {
-                        int id = idCounter.getAndIncrement();
-                        qNameToId.put(cs.qualifiedName(), id);
-                        nextLevel.add(cs);
-                        allContexts.add(ClassContext.of(
-                                id, r.callerIds(), cs.qualifiedName(),
-                                r.depth(), r.source(), r.nodes(), r.nodes()));
-                        registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
-                                processedQNames, qNameToId, idCounter, allContexts, nextLevel);
-                    }
-                }
+                registerDepthResult(r, processedQNames, qNameToId, idCounter, allContexts, nextLevel);
             }
 
             allParsed.addAll(nextLevel);
@@ -251,20 +238,7 @@ public class ContextBuilderService {
 
             List<ClassStructure> finalLevel = new ArrayList<>();
             for (DepthResult r : mergeResults(awaitAll(finalFutures))) {
-                if (r == null || r.parsed().isEmpty()) continue;
-                for (ClassStructure cs : r.parsed()) {
-                    if (processedQNames.add(cs.qualifiedName()) ||
-                            cs.qualifiedName().equals(r.qName())) {
-                        int id = idCounter.getAndIncrement();
-                        qNameToId.put(cs.qualifiedName(), id);
-                        finalLevel.add(cs);
-                        allContexts.add(ClassContext.of(
-                                id, r.callerIds(), cs.qualifiedName(),
-                                r.depth(), r.source(), r.nodes(), r.nodes()));
-                        registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
-                                processedQNames, qNameToId, idCounter, allContexts, finalLevel);
-                    }
-                }
+                registerDepthResult(r, processedQNames, qNameToId, idCounter, allContexts, finalLevel);
             }
             allParsed.addAll(finalLevel);
         }
@@ -294,7 +268,8 @@ public class ContextBuilderService {
             }
         }
 
-        return new ContextResponse(mrInfo, allContexts, request.depth(), allContexts.size());
+        List<ClassContext> resultContexts = enrichAndFilterContexts(allContexts, allParsed, qNameToId);
+        return new ContextResponse(mrInfo, resultContexts, request.depth(), resultContexts.size());
     }
 
     // ── mergeResults ────────────────────────────────────────────────────────────────
@@ -339,7 +314,45 @@ public class ContextBuilderService {
         return new ArrayList<>(merged.values());
     }
 
-    // ── registerNestedClasses ─────────────────────────────────────────────────────
+    // ── registerDepthResult / registerNestedClasses ─────────────────────────────
+
+    /**
+     * Регистрирует классы из {@link DepthResult}: новые — создаёт контекст,
+     * уже известные (например, вложенные) — дополняет {@code callerIds}.
+     */
+    private void registerDepthResult(
+            DepthResult r,
+            Set<String> processedQNames,
+            Map<String, Integer> qNameToId,
+            AtomicInteger idCounter,
+            List<ClassContext> allContexts,
+            List<ClassStructure> levelList) {
+        if (r == null || r.parsed().isEmpty()) return;
+
+        for (ClassStructure cs : r.parsed()) {
+            String qn = cs.qualifiedName();
+            boolean isRequested = qn.equals(r.qName());
+
+            if (!processedQNames.add(qn) && !isRequested) {
+                continue;
+            }
+
+            if (qNameToId.containsKey(qn)) {
+                mergeCallerIds(allContexts, qn, r.callerIds(), qNameToId);
+            } else {
+                int id = idCounter.getAndIncrement();
+                qNameToId.put(qn, id);
+                allContexts.add(ClassContext.of(
+                        id, r.callerIds(), qn, r.depth(), r.source(), r.nodes(), r.nodes()));
+                registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
+                        processedQNames, qNameToId, idCounter, allContexts, levelList, id);
+            }
+
+            if (isRequested || levelList.stream().noneMatch(c -> c.qualifiedName().equals(qn))) {
+                levelList.add(cs);
+            }
+        }
+    }
 
     /**
      * Регистрирует все вложенные классы {@code cs} как полноценные {@link ClassContext}
@@ -360,7 +373,8 @@ public class ContextBuilderService {
             Map<String, Integer> qNameToId,
             AtomicInteger idCounter,
             List<ClassContext> allContexts,
-            List<ClassStructure> nextLevel) {
+            List<ClassStructure> nextLevel,
+            int parentId) {
 
         for (ClassStructure nested : cs.nestedClasses()) {
             if (processedQNames.add(nested.qualifiedName())) {
@@ -374,15 +388,97 @@ public class ContextBuilderService {
                         ? nodeMapper.findNestedTypeNodes(tgtNodes, simpleName)
                         : null;
 
+                Set<Integer> nestedCallers = depth == 0 ? Set.of() : Set.of(parentId);
                 allContexts.add(ClassContext.of(
-                        id, Set.of(), nested.qualifiedName(),
+                        id, nestedCallers, nested.qualifiedName(),
                         depth, source, nestedSrcNodes, nestedTgtNodes));
-                log.debug("Registered nested class '{}' at depth {}", nested.qualifiedName(), depth);
+                log.debug("Registered nested class '{}' at depth {} with callers {}",
+                        nested.qualifiedName(), depth, nestedCallers);
 
                 registerNestedClasses(nested, depth, source, nestedSrcNodes, nestedTgtNodes,
-                        processedQNames, qNameToId, idCounter, allContexts, nextLevel);
+                        processedQNames, qNameToId, idCounter, allContexts, nextLevel, id);
             }
         }
+    }
+
+    /**
+     * Дополняет {@code callerIds} по графу ссылок (через id, не по строковому имени)
+     * и исключает зависимости (level &gt; 0) без потребителей.
+     */
+    private List<ClassContext> enrichAndFilterContexts(
+            List<ClassContext> allContexts,
+            List<ClassStructure> allParsed,
+            Map<String, Integer> qNameToId) {
+        Set<String> knownQNames = new LinkedHashSet<>(qNameToId.keySet());
+        collectRawRefs(allParsed).stream()
+                .filter(ref -> !ref.isUnresolved())
+                .map(UnresolvedTypeRef::name)
+                .forEach(knownQNames::add);
+
+        Map<Integer, Set<Integer>> targetIdToCallers = new LinkedHashMap<>();
+        for (ClassStructure cs : allParsed) {
+            Integer callerId = qNameToId.get(cs.qualifiedName());
+            if (callerId == null) continue;
+            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
+                String resolved = resolveRef(ref, knownQNames);
+                Integer targetId = qNameToId.get(resolved);
+                if (targetId != null) {
+                    targetIdToCallers
+                            .computeIfAbsent(targetId, k -> new LinkedHashSet<>())
+                            .add(callerId);
+                }
+            }
+        }
+        Map<String, Set<Integer>> refToCallerIds =
+                collectRefToCallerIds(allParsed, knownQNames, qNameToId);
+
+        List<ClassContext> result = new ArrayList<>(allContexts.size());
+        for (ClassContext ctx : allContexts) {
+            if (ctx.level() == 0) {
+                result.add(ctx);
+                continue;
+            }
+            Set<Integer> callers = new LinkedHashSet<>(ctx.callerIds());
+            callers.addAll(targetIdToCallers.getOrDefault(ctx.id(), Set.of()));
+            callers.addAll(refToCallerIds.getOrDefault(ctx.name(), Set.of()));
+            if (callers.isEmpty()) {
+                log.debug("Skipping context '{}' (level={}) — no callers", ctx.name(), ctx.level());
+                continue;
+            }
+            result.add(callers.equals(ctx.callerIds()) ? ctx : withCallerIds(ctx, callers));
+        }
+        return result;
+    }
+
+    private void mergeCallerIds(
+            List<ClassContext> allContexts,
+            String qName,
+            Set<Integer> newCallers,
+            Map<String, Integer> qNameToId) {
+        if (newCallers.isEmpty()) return;
+        Integer id = qNameToId.get(qName);
+        if (id == null) return;
+        for (int i = 0; i < allContexts.size(); i++) {
+            ClassContext ctx = allContexts.get(i);
+            if (ctx.id() != id) continue;
+            Set<Integer> merged = new LinkedHashSet<>(ctx.callerIds());
+            merged.addAll(newCallers);
+            if (!merged.equals(ctx.callerIds())) {
+                allContexts.set(i, withCallerIds(ctx, merged));
+            }
+            return;
+        }
+    }
+
+    private static ClassContext withCallerIds(ClassContext ctx, Set<Integer> callerIds) {
+        if (ctx instanceof UnchangedClassContext u) {
+            return new UnchangedClassContext(
+                    u.id(), u.name(), u.level(), callerIds, u.module(), u.structure());
+        }
+        ModifiedClassContext m = (ModifiedClassContext) ctx;
+        return new ModifiedClassContext(
+                m.id(), m.name(), m.level(), callerIds, m.module(),
+                m.structureSource(), m.structureTarget());
     }
 
     // ── fetchAndParse ────────────────────────────────────────────────────────────────
