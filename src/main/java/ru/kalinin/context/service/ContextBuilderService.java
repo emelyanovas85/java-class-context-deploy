@@ -122,6 +122,7 @@ public class ContextBuilderService {
         List<ClassContext> allContexts = new ArrayList<>();
         Set<String> processedQNames = new LinkedHashSet<>();
         Map<String, Integer> qNameToId = new LinkedHashMap<>();
+        Map<String, String> nestedToRootTopLevel = new LinkedHashMap<>();
         AtomicInteger idCounter = new AtomicInteger(1);
 
         // Счётчики для summary-лога
@@ -162,14 +163,18 @@ public class ContextBuilderService {
 
             String src0 = repoSource(r.filePath());
             for (ClassStructure cs : r.parsed()) {
+                mapNestedToRootTopLevel(cs, nestedToRootTopLevel);
                 if (processedQNames.add(cs.qualifiedName())) {
                     int id = idCounter.getAndIncrement();
                     qNameToId.put(cs.qualifiedName(), id);
                     level0.add(cs);
+                    List<StructureNode> srcForClass =
+                            structureNodesForClass(r.srcNodes(), r.parsed(), cs);
+                    List<StructureNode> tgtForClass = r.tgtNodes() != null
+                            ? structureNodesForClass(r.tgtNodes(), r.parsed(), cs)
+                            : null;
                     allContexts.add(ClassContext.of(
-                            id, Set.of(), cs.qualifiedName(), 0, src0, r.srcNodes(), r.tgtNodes()));
-                    registerNestedClasses(cs, 0, src0, r.srcNodes(), r.tgtNodes(),
-                            processedQNames, qNameToId, idCounter, allContexts, level0, id);
+                            id, Set.of(), cs.qualifiedName(), 0, src0, srcForClass, tgtForClass));
                 }
             }
         }
@@ -181,12 +186,17 @@ public class ContextBuilderService {
         for (int depth = 1; depth <= request.depth(); depth++) {
             Map<String, Set<Integer>> refToCallerIds =
                     collectRefToCallerIds(currentLevel, processedQNames, qNameToId);
-            List<String> wave = refToCallerIds.keySet().stream()
-                    .filter(n -> !processedQNames.contains(n))
-                    .toList();
+            Map<Integer, String> idToQn = invertQNameToId(qNameToId);
+            WavePartition partition = partitionWave(
+                    refToCallerIds, processedQNames, nestedToRootTopLevel, idToQn);
+            List<String> wave = partition.toFetch();
+            if (wave.isEmpty() && partition.internalNestedSkipped().isEmpty()) break;
+
+            processedQNames.addAll(partition.internalNestedSkipped());
             if (wave.isEmpty()) break;
 
-            log.debug("Depth {}: resolving {} types in parallel", depth, wave.size());
+            log.debug("Depth {}: resolving {} types in parallel ({} inline nested skipped)",
+                    depth, wave.size(), partition.internalNestedSkipped().size());
             processedQNames.addAll(wave);
 
             final int currentDepth = depth;
@@ -202,7 +212,7 @@ public class ContextBuilderService {
 
             List<ClassStructure> nextLevel = new ArrayList<>();
             for (DepthResult r : mergeResults(awaitAll(futures))) {
-                registerDepthResult(r, processedQNames, qNameToId, idCounter, allContexts, nextLevel);
+                registerDepthResult(r, qNameToId, idCounter, allContexts, nextLevel, nestedToRootTopLevel);
             }
 
             allParsed.addAll(nextLevel);
@@ -218,12 +228,18 @@ public class ContextBuilderService {
 
         Map<String, Set<Integer>> finalRefToCallerIds =
                 collectRefToCallerIds(allParsed, enrichedQNames, qNameToId);
-        List<String> finalWave = finalRefToCallerIds.keySet().stream()
-                .filter(n -> !processedQNames.contains(n))
-                .toList();
+        Map<Integer, String> finalIdToQn = invertQNameToId(qNameToId);
+        WavePartition finalPartition = partitionWave(
+                finalRefToCallerIds, processedQNames, nestedToRootTopLevel, finalIdToQn);
+        List<String> finalWave = finalPartition.toFetch();
+
+        if (!finalWave.isEmpty() || !finalPartition.internalNestedSkipped().isEmpty()) {
+            processedQNames.addAll(finalPartition.internalNestedSkipped());
+        }
 
         if (!finalWave.isEmpty()) {
-            log.info("Final pass: resolving {} previously unresolved types in parallel", finalWave.size());
+            log.info("Final pass: resolving {} previously unresolved types in parallel ({} inline nested skipped)",
+                    finalWave.size(), finalPartition.internalNestedSkipped().size());
             processedQNames.addAll(finalWave);
 
             List<CompletableFuture<DepthResult>> finalFutures = finalWave.stream()
@@ -238,7 +254,7 @@ public class ContextBuilderService {
 
             List<ClassStructure> finalLevel = new ArrayList<>();
             for (DepthResult r : mergeResults(awaitAll(finalFutures))) {
-                registerDepthResult(r, processedQNames, qNameToId, idCounter, allContexts, finalLevel);
+                registerDepthResult(r, qNameToId, idCounter, allContexts, finalLevel, nestedToRootTopLevel);
             }
             allParsed.addAll(finalLevel);
         }
@@ -268,7 +284,8 @@ public class ContextBuilderService {
             }
         }
 
-        List<ClassContext> resultContexts = enrichAndFilterContexts(allContexts, allParsed, qNameToId);
+        List<ClassContext> resultContexts =
+                enrichAndFilterContexts(allContexts, allParsed, qNameToId, nestedToRootTopLevel);
         return new ContextResponse(mrInfo, resultContexts, request.depth(), resultContexts.size());
     }
 
@@ -314,91 +331,196 @@ public class ContextBuilderService {
         return new ArrayList<>(merged.values());
     }
 
-    // ── registerDepthResult / registerNestedClasses ─────────────────────────────
+    // ── registerDepthResult / nested helpers ────────────────────────────────────
 
     /**
-     * Регистрирует классы из {@link DepthResult}: новые — создаёт контекст,
-     * уже известные (например, вложенные) — дополняет {@code callerIds}.
+     * Регистрирует только запрошенный тип {@code r.qName()} из результата парсинга файла.
+     * Nested-классы не добавляются отдельно — они остаются inline в структуре outer-класса.
      */
     private void registerDepthResult(
             DepthResult r,
-            Set<String> processedQNames,
             Map<String, Integer> qNameToId,
             AtomicInteger idCounter,
             List<ClassContext> allContexts,
-            List<ClassStructure> levelList) {
+            List<ClassStructure> levelList,
+            Map<String, String> nestedToRootTopLevel) {
         if (r == null || r.parsed().isEmpty()) return;
 
-        for (ClassStructure cs : r.parsed()) {
-            String qn = cs.qualifiedName();
-            boolean isRequested = qn.equals(r.qName());
+        for (ClassStructure root : r.parsed()) {
+            mapNestedToRootTopLevel(root, nestedToRootTopLevel);
+        }
 
-            if (!processedQNames.add(qn) && !isRequested) {
-                continue;
-            }
+        ClassStructure requested = findClassStructure(r.parsed(), r.qName());
+        if (requested == null) {
+            log.debug("Requested type '{}' not found in parsed structures", r.qName());
+            return;
+        }
 
-            if (qNameToId.containsKey(qn)) {
-                mergeCallerIds(allContexts, qn, r.callerIds(), qNameToId);
-            } else {
-                int id = idCounter.getAndIncrement();
-                qNameToId.put(qn, id);
-                allContexts.add(ClassContext.of(
-                        id, r.callerIds(), qn, r.depth(), r.source(), r.nodes(), r.nodes()));
-                registerNestedClasses(cs, r.depth(), r.source(), r.nodes(), r.nodes(),
-                        processedQNames, qNameToId, idCounter, allContexts, levelList, id);
-            }
+        String qn = requested.qualifiedName();
+        List<StructureNode> srcNodes = structureNodesForClass(r.nodes(), r.parsed(), requested);
+        List<StructureNode> tgtNodes = structureNodesForClass(r.nodes(), r.parsed(), requested);
 
-            if (isRequested || levelList.stream().noneMatch(c -> c.qualifiedName().equals(qn))) {
-                levelList.add(cs);
-            }
+        if (qNameToId.containsKey(qn)) {
+            mergeCallerIds(allContexts, qn, r.callerIds(), qNameToId);
+        } else {
+            int id = idCounter.getAndIncrement();
+            qNameToId.put(qn, id);
+            allContexts.add(ClassContext.of(
+                    id, r.callerIds(), qn, r.depth(), r.source(), srcNodes, tgtNodes));
+        }
+
+        if (levelList.stream().noneMatch(c -> c.qualifiedName().equals(qn))) {
+            levelList.add(requested);
         }
     }
 
-    /**
-     * Регистрирует все вложенные классы {@code cs} как полноценные {@link ClassContext}
-     * с тем же {@code depth} и {@code source}, что и родительский класс.
-     * Для каждого nested класса извлекается его собственное поддерево {@link StructureNode}
-     * через {@link StructureNodeMapper#findNestedTypeNodes(List, String)}.
-     * Каждый nested класс добавляется в {@code nextLevel}, чтобы его собственные
-     * ссылки участвовали в следующей волне BFS.
-     * Рекурсивно обрабатывает вложенные вложенных.
-     */
-    private void registerNestedClasses(
-            ClassStructure cs,
-            int depth,
-            String source,
-            List<StructureNode> srcNodes,
-            List<StructureNode> tgtNodes,
-            Set<String> processedQNames,
-            Map<String, Integer> qNameToId,
-            AtomicInteger idCounter,
-            List<ClassContext> allContexts,
-            List<ClassStructure> nextLevel,
-            int parentId) {
+    private List<StructureNode> structureNodesForClass(
+            List<StructureNode> fileNodes,
+            List<ClassStructure> fileParsed,
+            ClassStructure cs) {
+        if (fileNodes == null || fileNodes.isEmpty()) return List.of();
+        int topLevelIdx = indexOfTopLevelType(fileParsed, cs.qualifiedName());
+        if (topLevelIdx >= 0) {
+            return nodeMapper.structureForTopLevelIndex(fileNodes, topLevelIdx);
+        }
+        return nodeMapper.structureForNestedType(fileNodes, cs.name());
+    }
 
-        for (ClassStructure nested : cs.nestedClasses()) {
-            if (processedQNames.add(nested.qualifiedName())) {
-                int id = idCounter.getAndIncrement();
-                qNameToId.put(nested.qualifiedName(), id);
-                nextLevel.add(nested);
-
-                String simpleName = nested.name();
-                List<StructureNode> nestedSrcNodes = nodeMapper.findNestedTypeNodes(srcNodes, simpleName);
-                List<StructureNode> nestedTgtNodes = tgtNodes != null
-                        ? nodeMapper.findNestedTypeNodes(tgtNodes, simpleName)
-                        : null;
-
-                Set<Integer> nestedCallers = depth == 0 ? Set.of() : Set.of(parentId);
-                allContexts.add(ClassContext.of(
-                        id, nestedCallers, nested.qualifiedName(),
-                        depth, source, nestedSrcNodes, nestedTgtNodes));
-                log.debug("Registered nested class '{}' at depth {} with callers {}",
-                        nested.qualifiedName(), depth, nestedCallers);
-
-                registerNestedClasses(nested, depth, source, nestedSrcNodes, nestedTgtNodes,
-                        processedQNames, qNameToId, idCounter, allContexts, nextLevel, id);
+    private static int indexOfTopLevelType(List<ClassStructure> fileParsed, String qualifiedName) {
+        for (int i = 0; i < fileParsed.size(); i++) {
+            if (fileParsed.get(i).qualifiedName().equals(qualifiedName)) {
+                return i;
             }
         }
+        return -1;
+    }
+
+    record WavePartition(List<String> toFetch, List<String> internalNestedSkipped) {}
+
+    /**
+     * Делит кандидатов волны на fetch и inline-only nested.
+     * Nested, на который ссылаются только классы внутри одного top-level outer, не fetch'ится отдельно.
+     */
+    static WavePartition partitionWave(
+            Map<String, Set<Integer>> refToCallerIds,
+            Set<String> processedQNames,
+            Map<String, String> nestedToRootTopLevel,
+            Map<Integer, String> idToQn) {
+        List<String> toFetch = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+        for (Map.Entry<String, Set<Integer>> entry : refToCallerIds.entrySet()) {
+            String target = entry.getKey();
+            if (processedQNames.contains(target)) continue;
+            if (shouldFetchType(target, entry.getValue(), nestedToRootTopLevel, idToQn)) {
+                toFetch.add(target);
+            } else {
+                skipped.add(target);
+                log.debug("Skipping inline nested '{}' — enclosed in '{}'",
+                        target, nestedToRootTopLevel.get(target));
+            }
+        }
+        return new WavePartition(toFetch, skipped);
+    }
+
+    /**
+     * @return {@code true} если тип нужно fetch'ить как отдельный {@link ClassContext}
+     */
+    static boolean shouldFetchType(
+            String targetQn,
+            Set<Integer> callerIds,
+            Map<String, String> nestedToRootTopLevel,
+            Map<Integer, String> idToQn) {
+        String rootTop = nestedToRootTopLevel.get(targetQn);
+        if (rootTop == null) return true;
+        if (callerIds == null || callerIds.isEmpty()) return true;
+        for (Integer callerId : callerIds) {
+            String callerQn = idToQn.get(callerId);
+            if (callerQn == null) return true;
+            if (!isEnclosedInTopLevel(callerQn, rootTop, nestedToRootTopLevel)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<Integer, String> invertQNameToId(Map<String, Integer> qNameToId) {
+        Map<Integer, String> idToQn = new LinkedHashMap<>();
+        qNameToId.forEach((qn, id) -> idToQn.put(id, qn));
+        return idToQn;
+    }
+
+    private static void mapNestedToRootTopLevel(
+            ClassStructure rootTopLevel,
+            Map<String, String> nestedToRootTopLevel) {
+        mapNestedRecursive(rootTopLevel.nestedClasses(), rootTopLevel.qualifiedName(), nestedToRootTopLevel);
+    }
+
+    private static void mapNestedRecursive(
+            List<ClassStructure> nested,
+            String rootTopLevelQn,
+            Map<String, String> nestedToRootTopLevel) {
+        for (ClassStructure nc : nested) {
+            nestedToRootTopLevel.put(nc.qualifiedName(), rootTopLevelQn);
+            mapNestedRecursive(nc.nestedClasses(), rootTopLevelQn, nestedToRootTopLevel);
+        }
+    }
+
+    private static ClassStructure findClassStructure(List<ClassStructure> parsed, String qName) {
+        for (ClassStructure cs : parsed) {
+            ClassStructure found = findClassStructureRecursive(cs, qName);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static ClassStructure findClassStructureRecursive(ClassStructure cs, String qName) {
+        if (cs.qualifiedName().equals(qName)) return cs;
+        for (ClassStructure nested : cs.nestedClasses()) {
+            ClassStructure found = findClassStructureRecursive(nested, qName);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static ClassStructure findInAllParsed(List<ClassStructure> allParsed, String qName) {
+        for (ClassStructure cs : allParsed) {
+            ClassStructure found = findClassStructureRecursive(cs, qName);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /**
+     * Nested-типы, на которые ссылаются классы вне их top-level outer-контейнера.
+     */
+    private Set<String> collectExternallyReferencedNested(
+            List<ClassStructure> allParsed,
+            Map<String, String> nestedToRootTopLevel,
+            Map<String, Integer> qNameToId,
+            Set<String> knownQNames) {
+        Set<String> expand = new LinkedHashSet<>();
+        for (ClassStructure cs : allParsed) {
+            Integer callerId = qNameToId.get(cs.qualifiedName());
+            if (callerId == null) continue;
+            String callerQn = cs.qualifiedName();
+            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
+                String target = resolveRef(ref, knownQNames);
+                String rootTop = nestedToRootTopLevel.get(target);
+                if (rootTop == null) continue;
+                if (!isEnclosedInTopLevel(callerQn, rootTop, nestedToRootTopLevel)) {
+                    expand.add(target);
+                }
+            }
+        }
+        return expand;
+    }
+
+    private static boolean isEnclosedInTopLevel(
+            String callerQn,
+            String rootTopLevelQn,
+            Map<String, String> nestedToRootTopLevel) {
+        if (callerQn.equals(rootTopLevelQn)) return true;
+        return rootTopLevelQn.equals(nestedToRootTopLevel.get(callerQn));
     }
 
     /**
@@ -408,12 +530,16 @@ public class ContextBuilderService {
     private List<ClassContext> enrichAndFilterContexts(
             List<ClassContext> allContexts,
             List<ClassStructure> allParsed,
-            Map<String, Integer> qNameToId) {
+            Map<String, Integer> qNameToId,
+            Map<String, String> nestedToRootTopLevel) {
         Set<String> knownQNames = new LinkedHashSet<>(qNameToId.keySet());
         collectRawRefs(allParsed).stream()
                 .filter(ref -> !ref.isUnresolved())
                 .map(UnresolvedTypeRef::name)
                 .forEach(knownQNames::add);
+
+        Set<String> expandNested = collectExternallyReferencedNested(
+                allParsed, nestedToRootTopLevel, qNameToId, knownQNames);
 
         Map<Integer, Set<Integer>> targetIdToCallers = new LinkedHashMap<>();
         for (ClassStructure cs : allParsed) {
@@ -434,20 +560,65 @@ public class ContextBuilderService {
 
         List<ClassContext> result = new ArrayList<>(allContexts.size());
         for (ClassContext ctx : allContexts) {
-            if (ctx.level() == 0) {
-                result.add(ctx);
+            ClassContext ctxOut = applyNestedVisibility(ctx, allParsed, nestedToRootTopLevel, expandNested);
+
+            if (ctxOut.level() == 0) {
+                result.add(ctxOut);
                 continue;
             }
-            Set<Integer> callers = new LinkedHashSet<>(ctx.callerIds());
-            callers.addAll(targetIdToCallers.getOrDefault(ctx.id(), Set.of()));
-            callers.addAll(refToCallerIds.getOrDefault(ctx.name(), Set.of()));
+            Set<Integer> callers = new LinkedHashSet<>(ctxOut.callerIds());
+            callers.addAll(targetIdToCallers.getOrDefault(ctxOut.id(), Set.of()));
+            callers.addAll(refToCallerIds.getOrDefault(ctxOut.name(), Set.of()));
             if (callers.isEmpty()) {
-                log.debug("Skipping context '{}' (level={}) — no callers", ctx.name(), ctx.level());
+                log.debug("Skipping context '{}' (level={}) — no callers", ctxOut.name(), ctxOut.level());
                 continue;
             }
-            result.add(callers.equals(ctx.callerIds()) ? ctx : withCallerIds(ctx, callers));
+            result.add(callers.equals(ctxOut.callerIds()) ? ctxOut : withCallerIds(ctxOut, callers));
         }
         return result;
+    }
+
+    /**
+     * Для top-level outer-классов сворачивает «внутренние» nested до сигнатуры.
+     * Отдельные nested-контексты (запрошенные через BFS) не трогает.
+     */
+    private ClassContext applyNestedVisibility(
+            ClassContext ctx,
+            List<ClassStructure> allParsed,
+            Map<String, String> nestedToRootTopLevel,
+            Set<String> expandNested) {
+        if (nestedToRootTopLevel.containsKey(ctx.name())) {
+            return ctx;
+        }
+        ClassStructure cs = findInAllParsed(allParsed, ctx.name());
+        if (cs == null) return ctx;
+        return withPrunedStructure(ctx, cs, expandNested);
+    }
+
+    private ClassContext withPrunedStructure(
+            ClassContext ctx,
+            ClassStructure rootCs,
+            Set<String> expandNested) {
+        if (ctx instanceof UnchangedClassContext u) {
+            List<StructureNode> pruned = nodeMapper.pruneInternalNested(
+                    u.structure(), rootCs, expandNested);
+            if (Objects.equals(pruned, u.structure())) return ctx;
+            return new UnchangedClassContext(
+                    u.id(), u.name(), u.level(), u.callerIds(), u.module(), pruned);
+        }
+        ModifiedClassContext m = (ModifiedClassContext) ctx;
+        List<StructureNode> prunedSrc = m.structureSource() != null
+                ? nodeMapper.pruneInternalNested(m.structureSource(), rootCs, expandNested)
+                : null;
+        List<StructureNode> prunedTgt = m.structureTarget() != null
+                ? nodeMapper.pruneInternalNested(m.structureTarget(), rootCs, expandNested)
+                : null;
+        if (Objects.equals(prunedSrc, m.structureSource())
+                && Objects.equals(prunedTgt, m.structureTarget())) {
+            return ctx;
+        }
+        return new ModifiedClassContext(
+                m.id(), m.name(), m.level(), m.callerIds(), m.module(), prunedSrc, prunedTgt);
     }
 
     private void mergeCallerIds(

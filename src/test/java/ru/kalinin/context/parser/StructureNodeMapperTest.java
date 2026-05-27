@@ -1,9 +1,11 @@
 package ru.kalinin.context.parser;
 
 import org.junit.jupiter.api.Test;
+import ru.kalinin.context.model.ClassStructure;
 import ru.kalinin.context.model.StructureNode;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -87,6 +89,83 @@ class StructureNodeMapperTest {
         assertThat(nested.signature()).contains("Builder");
         assertThat(nested.children()).anySatisfy(n ->
                 assertThat(n.type()).isIn("field", "method"));
+    }
+
+    @Test
+    void pruneInternalNested_collapsesUnusedNestedToSignature() {
+        List<StructureNode> nodes = mapper.map(CLASS_SOURCE, "Foo.java");
+        ClassStructure owner = new ClassStructure(
+                List.of(), List.of(), "class", "Foo", "com.example.Foo",
+                List.of(), null, List.of(), List.of(), List.of(),
+                List.of(new ClassStructure(
+                        List.of(), List.of("static"), "class", "Builder", "com.example.Foo.Builder",
+                        List.of(), null, List.of(), List.of(), List.of(), List.of(),
+                        "Foo.java", 0, List.of())),
+                "Foo.java", 0, List.of());
+
+        List<StructureNode> pruned = mapper.pruneInternalNested(nodes, owner, Set.of());
+
+        StructureNode cls = pruned.get(0);
+        StructureNode builder = cls.children().stream()
+                .filter(n -> "class".equals(n.type()))
+                .findFirst().orElseThrow();
+        assertThat(builder.signature()).contains("Builder");
+        assertThat(builder.children()).isNull();
+    }
+
+    @Test
+    void pruneInternalNested_keepsExpandedNested() {
+        List<StructureNode> nodes = mapper.map(CLASS_SOURCE, "Foo.java");
+        ClassStructure owner = new ClassStructure(
+                List.of(), List.of(), "class", "Foo", "com.example.Foo",
+                List.of(), null, List.of(), List.of(), List.of(), List.of(),
+                "Foo.java", 0, List.of());
+
+        List<StructureNode> pruned = mapper.pruneInternalNested(
+                nodes, owner, Set.of("com.example.Foo.Builder"));
+
+        StructureNode builder = pruned.get(0).children().stream()
+                .filter(n -> "class".equals(n.type()))
+                .findFirst().orElseThrow();
+        assertThat(builder.children()).anySatisfy(n ->
+                assertThat(n.type()).isIn("field", "method"));
+    }
+
+    @Test
+    void structureForType_extractsTopLevelClass() {
+        List<StructureNode> fileNodes = mapper.map(CLASS_SOURCE, "Foo.java");
+        List<StructureNode> foo = mapper.structureForType(fileNodes, "Foo");
+        assertThat(foo).hasSize(1);
+        assertThat(foo.get(0).signature()).contains("class Foo");
+        assertThat(foo.get(0).children()).anySatisfy(n -> assertThat(n.type()).isEqualTo("field"));
+    }
+
+    @Test
+    void structureForType_extractsClassWithExtends() {
+        String src = """
+                package com.example;
+                public class Foo extends BaseFoo implements IFoo {
+                    private String name;
+                }
+                """;
+        List<StructureNode> fileNodes = mapper.map(src, "Foo.java");
+        List<StructureNode> foo = mapper.structureForType(fileNodes, "Foo");
+        assertThat(foo).hasSize(1);
+        assertThat(foo.get(0).children()).anySatisfy(n -> assertThat(n.type()).isEqualTo("field"));
+    }
+
+    @Test
+    void structureForTopLevelIndex_matchesParseOrder() {
+        String src = """
+                package com.example;
+                public class Alpha { int a; }
+                public class Beta { int b; }
+                """;
+        List<StructureNode> fileNodes = mapper.map(src, "Both.java");
+        List<StructureNode> beta = mapper.structureForTopLevelIndex(fileNodes, 1);
+        assertThat(beta).hasSize(1);
+        assertThat(beta.get(0).signature()).contains("class Beta");
+        assertThat(beta.get(0).children()).anySatisfy(n -> assertThat(n.type()).isEqualTo("field"));
     }
 
     @Test
