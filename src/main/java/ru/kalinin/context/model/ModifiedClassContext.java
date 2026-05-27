@@ -15,7 +15,7 @@ public record ModifiedClassContext(
         String name,
         int level,
         Set<Integer> callerIds,
-        String source,
+        String module,
         List<StructureNode> structureSource,
         List<StructureNode> structureTarget
 ) implements ClassContext {
@@ -26,7 +26,7 @@ public record ModifiedClassContext(
         String header = "### " + name
                 + "  [level=" + level + ", id=" + id
                 + ", callers=" + callerIds
-                + ", source=" + source + "]";
+                + ", module=" + module + "]";
         sb.append(header).append('\n');
         if (structureSource != null) {
             sb.append("#### [branch=source]\n");

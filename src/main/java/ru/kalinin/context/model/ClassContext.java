@@ -19,7 +19,7 @@ import java.util.Set;
  * id классов, которые непосредственно ссылаются на данный. Классы уровня 0
  * имеют пустой {@code callerIds}.
  *
- * <h3>Поле source</h3>
+ * <h3>Поле module</h3>
  * <p>Описывает, откуда был получен класс:
  * <ul>
  *   <li>{@code "main"} — из {@code src/main/java/} репозитория</li>
@@ -53,7 +53,7 @@ public sealed interface ClassContext
      * {@code "main"}, {@code "test"} или
      * {@code "groupId:artifactId:version"} для внешних зависимостей.
      */
-    String source();
+    String module();
 
     /**
      * Фабрика: сравнивает структуры и возвращает подходящий подтип.

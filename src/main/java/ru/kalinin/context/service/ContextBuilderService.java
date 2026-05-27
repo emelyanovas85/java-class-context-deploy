@@ -345,7 +345,7 @@ public class ContextBuilderService {
      * Регистрирует все вложенные классы {@code cs} как полноценные {@link ClassContext}
      * с тем же {@code depth} и {@code source}, что и родительский класс.
      * Для каждого nested класса извлекается его собственное поддерево {@link StructureNode}
-     * через {@link StructureNodeMapper#findNestedTypeNodes}.
+     * через {@link StructureNodeMapper#findNestedTypeNodes(List, String)}.
      * Каждый nested класс добавляется в {@code nextLevel}, чтобы его собственные
      * ссылки участвовали в следующей волне BFS.
      * Рекурсивно обрабатывает вложенные вложенных.
@@ -368,7 +368,7 @@ public class ContextBuilderService {
                 qNameToId.put(nested.qualifiedName(), id);
                 nextLevel.add(nested);
 
-                String simpleName = nested.simpleName();
+                String simpleName = nested.name();
                 List<StructureNode> nestedSrcNodes = nodeMapper.findNestedTypeNodes(srcNodes, simpleName);
                 List<StructureNode> nestedTgtNodes = tgtNodes != null
                         ? nodeMapper.findNestedTypeNodes(tgtNodes, simpleName)

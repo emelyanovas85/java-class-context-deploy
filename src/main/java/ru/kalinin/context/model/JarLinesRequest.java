@@ -19,13 +19,13 @@ public record JarLinesRequest(
 
         @Schema(
                 description = "Maven-координаты зависимости в формате groupId:artifactId:version."
-                        + " Соответствует полю source в ClassContext.",
+                        + " Соответствует полю module в ClassContext.",
                 example = "org.aspectj:aspectjweaver:1.9.22"
         )
-        @NotBlank(message = "source must not be blank")
+        @NotBlank(message = "module must not be blank")
         @Pattern(
                 regexp = "[^:]+:[^:]+:[^:]+",
-                message = "source must be in format groupId:artifactId:version"
+                message = "module must be in format groupId:artifactId:version"
         )
         String source,
 

@@ -113,8 +113,8 @@ public class ContextController {
                     Читает исходники из локального `*-sources.jar` и возвращает
                     содержимое указанных диапазонов строк.
 
-                    `source` — Maven-координаты в формате `groupId:artifactId:version`,
-                    точно соответствующие полю `source` в `ClassContext`
+                    `module` — Maven-координаты в формате `groupId:artifactId:version`,
+                    точно соответствующие полю `module` в `ClassContext`
                     (например `org.aspectj:aspectjweaver:1.9.22`).
 
                     `qualifiedName` — полное имя класса внутри jar
@@ -135,7 +135,7 @@ public class ContextController {
     })
     @PostMapping("/source-lines/jar")
     public ResponseEntity<SourceLinesResponse> getJarLines(@Valid @RequestBody JarLinesRequest request) {
-        log.info("Fetching jar source lines: source='{}', classes={}",
+        log.info("Fetching jar source lines: module='{}', classes={}",
                 request.source(), request.classes().size());
         return ResponseEntity.ok(sourceLinesService.fetchFromJar(request));
     }

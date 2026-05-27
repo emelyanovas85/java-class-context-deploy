@@ -14,7 +14,7 @@ public record UnchangedClassContext(
         String name,
         int level,
         Set<Integer> callerIds,
-        String source,
+        String module,
         List<StructureNode> structure
 ) implements ClassContext {
 
@@ -26,7 +26,7 @@ public record UnchangedClassContext(
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        String header = "### " + name + "  [level=" + level + ", id=" + id + ", callers=" + callerIds + ", source=" + source + "]";
+        String header = "### " + name + "  [level=" + level + ", id=" + id + ", callers=" + callerIds + ", module=" + module + "]";
         sb.append(header).append("  [unchanged]\n");
         sb.append(StructureNodePrinter.render(structure, 0));
         return sb.toString();
