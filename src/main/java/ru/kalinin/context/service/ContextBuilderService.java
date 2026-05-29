@@ -83,7 +83,7 @@ public class ContextBuilderService {
             List<StructureNode> tgtNodes
     ) {}
 
-    private record DepthResult(
+    record DepthResult(
             String qName,
             Set<Integer> callerIds,
             List<ClassStructure> parsed,
@@ -302,33 +302,39 @@ public class ContextBuilderService {
      * но разные {@code callerIds}. Метод объединяет все {@code callerIds}
      * в одном {@link DepthResult}, оставляя остальные поля без изменений.
      *
-     * <p>Группировка по ключу {@code (parsed класс + source)} гарантирует,
+     * <p>Группировка по ключу {@code (top-level parsed класс + source)} гарантирует,
      * что не будет смешивания callerIds от разных файлов.
+     * Разные {@code qName} из одного файла (outer и nested) остаются отдельными
+     * результатами — иначе {@link #registerDepthResult} зарегистрирует только один тип.
      */
-    private List<DepthResult> mergeResults(List<DepthResult> raw) {
-        // Ключ: имя первого parsed-класса + source (оба пришли из одного файла)
+    List<DepthResult> mergeResults(List<DepthResult> raw) {
         record Key(String topClassName, String source) {}
 
-        Map<Key, DepthResult> merged = new LinkedHashMap<>();
+        Map<Key, Map<String, DepthResult>> merged = new LinkedHashMap<>();
         for (DepthResult r : raw) {
             if (r == null || r.parsed().isEmpty()) continue;
             Key key = new Key(r.parsed().get(0).qualifiedName(), r.source());
-            DepthResult existing = merged.get(key);
+            Map<String, DepthResult> byQName = merged.computeIfAbsent(key, k -> new LinkedHashMap<>());
+            DepthResult existing = byQName.get(r.qName());
             if (existing == null) {
-                merged.put(key, r);
+                byQName.put(r.qName(), r);
             } else {
-                // Объединяем callerIds, остальное берём из первого результата
                 Set<Integer> combined = new LinkedHashSet<>(existing.callerIds());
                 combined.addAll(r.callerIds());
-                merged.put(key, new DepthResult(
-                        existing.qName(), combined,
+                byQName.put(r.qName(), new DepthResult(
+                        r.qName(), combined,
                         existing.parsed(), existing.nodes(),
                         existing.source(), existing.depth()));
-                log.debug("Merged callerIds for '{}': {} + {} = {}",
-                        key.topClassName(), existing.callerIds(), r.callerIds(), combined);
+                log.debug("Merged callerIds for '{}' (qName={}): {} + {} = {}",
+                        key.topClassName(), r.qName(),
+                        existing.callerIds(), r.callerIds(), combined);
             }
         }
-        return new ArrayList<>(merged.values());
+        List<DepthResult> out = new ArrayList<>();
+        for (Map<String, DepthResult> byQName : merged.values()) {
+            out.addAll(byQName.values());
+        }
+        return out;
     }
 
     // ── registerDepthResult / nested helpers ────────────────────────────────────
@@ -491,28 +497,18 @@ public class ContextBuilderService {
     }
 
     /**
-     * Nested-типы, на которые ссылаются классы вне их top-level outer-контейнера.
+     * Nested-типы, для которых outer уже зарегистрирован — отдельный контекст не нужен.
      */
-    private Set<String> collectExternallyReferencedNested(
-            List<ClassStructure> allParsed,
+    static Set<String> nestedContextsSuppressedWhenOuterPresent(
             Map<String, String> nestedToRootTopLevel,
-            Map<String, Integer> qNameToId,
-            Set<String> knownQNames) {
-        Set<String> expand = new LinkedHashSet<>();
-        for (ClassStructure cs : allParsed) {
-            Integer callerId = qNameToId.get(cs.qualifiedName());
-            if (callerId == null) continue;
-            String callerQn = cs.qualifiedName();
-            for (UnresolvedTypeRef ref : structureParser.collectReferencedTypes(cs)) {
-                String target = resolveRef(ref, knownQNames);
-                String rootTop = nestedToRootTopLevel.get(target);
-                if (rootTop == null) continue;
-                if (!isEnclosedInTopLevel(callerQn, rootTop, nestedToRootTopLevel)) {
-                    expand.add(target);
-                }
+            Set<String> registeredQNames) {
+        Set<String> suppressed = new LinkedHashSet<>();
+        for (Map.Entry<String, String> e : nestedToRootTopLevel.entrySet()) {
+            if (registeredQNames.contains(e.getValue())) {
+                suppressed.add(e.getKey());
             }
         }
-        return expand;
+        return suppressed;
     }
 
     private static boolean isEnclosedInTopLevel(
@@ -538,8 +534,9 @@ public class ContextBuilderService {
                 .map(UnresolvedTypeRef::name)
                 .forEach(knownQNames::add);
 
-        Set<String> expandNested = collectExternallyReferencedNested(
-                allParsed, nestedToRootTopLevel, qNameToId, knownQNames);
+        Set<String> suppressSeparateNested = nestedContextsSuppressedWhenOuterPresent(
+                nestedToRootTopLevel, qNameToId.keySet());
+        Set<String> expandNested = new LinkedHashSet<>(suppressSeparateNested);
 
         Map<Integer, Set<Integer>> targetIdToCallers = new LinkedHashMap<>();
         for (ClassStructure cs : allParsed) {
@@ -555,11 +552,24 @@ public class ContextBuilderService {
                 }
             }
         }
+        redirectCallersFromNestedToOuter(
+                suppressSeparateNested, nestedToRootTopLevel, qNameToId,
+                targetIdToCallers, null);
+
         Map<String, Set<Integer>> refToCallerIds =
                 collectRefToCallerIds(allParsed, knownQNames, qNameToId);
+        redirectCallersFromNestedToOuter(
+                suppressSeparateNested, nestedToRootTopLevel, qNameToId,
+                null, refToCallerIds);
 
         List<ClassContext> result = new ArrayList<>(allContexts.size());
         for (ClassContext ctx : allContexts) {
+            if (suppressSeparateNested.contains(ctx.name())) {
+                log.debug("Skipping duplicate nested context '{}' — covered by outer '{}'",
+                        ctx.name(), nestedToRootTopLevel.get(ctx.name()));
+                continue;
+            }
+
             ClassContext ctxOut = applyNestedVisibility(ctx, allParsed, nestedToRootTopLevel, expandNested);
 
             if (ctxOut.level() == 0) {
@@ -578,9 +588,36 @@ public class ContextBuilderService {
         return result;
     }
 
+    private static void redirectCallersFromNestedToOuter(
+            Set<String> suppressSeparateNested,
+            Map<String, String> nestedToRootTopLevel,
+            Map<String, Integer> qNameToId,
+            Map<Integer, Set<Integer>> targetIdToCallers,
+            Map<String, Set<Integer>> refToCallerIds) {
+        for (String nestedQn : suppressSeparateNested) {
+            String outerQn = nestedToRootTopLevel.get(nestedQn);
+            if (outerQn == null) continue;
+            Integer nestedId = qNameToId.get(nestedQn);
+            Integer outerId = qNameToId.get(outerQn);
+            if (nestedId == null || outerId == null) continue;
+            if (targetIdToCallers != null) {
+                Set<Integer> callers = targetIdToCallers.remove(nestedId);
+                if (callers != null) {
+                    targetIdToCallers.computeIfAbsent(outerId, k -> new LinkedHashSet<>()).addAll(callers);
+                }
+            }
+            if (refToCallerIds != null) {
+                Set<Integer> callers = refToCallerIds.remove(nestedQn);
+                if (callers != null) {
+                    refToCallerIds.computeIfAbsent(outerQn, k -> new LinkedHashSet<>()).addAll(callers);
+                }
+            }
+        }
+    }
+
     /**
-     * Для top-level outer-классов сворачивает «внутренние» nested до сигнатуры.
-     * Отдельные nested-контексты (запрошенные через BFS) не трогает.
+     * Для top-level outer-классов сворачивает «внутренние» nested до сигнатуры,
+     * кроме типов из {@code expandNestedQNames} (полное дерево внутри outer).
      */
     private ClassContext applyNestedVisibility(
             ClassContext ctx,
