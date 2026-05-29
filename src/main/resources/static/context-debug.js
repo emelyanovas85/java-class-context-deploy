@@ -70,7 +70,7 @@
     classes.forEach((ctx, i) => {
       const index = i + 1;
       const sid = sectionId(index);
-      const body = escapeHtmlOutsideMarks(highlight(formatClassBody(ctx), patterns));
+      const body = highlightToSafeHtml(formatClassBody(ctx), patterns);
       html += '<section class="ctx-block" id="' + sid + '"><h2>';
       html += '<span class="section-idx">#' + index + '</span>';
       html += classLinkHtml(sid, ctx);
@@ -265,9 +265,7 @@
   }
 
   function isTypeTokenAt(text, start, end) {
-    const leftOk = start === 0 || isLeftTypeBoundary(text.charAt(start - 1));
-    const rightOk = end >= text.length || isRightTypeBoundary(text.charAt(end));
-    return leftOk && rightOk;
+    return isLeftTypeBoundaryAt(text, start) && isRightTypeBoundaryAt(text, end);
   }
 
   function isLeftTypeBoundary(c) {
@@ -279,10 +277,31 @@
         || c === ';' || c === '[' || c === ':' || /\s/.test(c);
   }
 
-  function highlight(text, patterns) {
-    if (!patterns.length || !text) return text;
+  /** Слева от типа: символ-граница или {@code &lt;} (если текст уже экранирован). */
+  function isLeftTypeBoundaryAt(text, start) {
+    if (start <= 0) return true;
+    if (isLeftTypeBoundary(text.charAt(start - 1))) return true;
+    return start >= 4 && text.substring(start - 4, start) === '&lt;';
+  }
+
+  /** Справа от типа: символ-граница или {@code &lt;}/{@code &gt;}. */
+  function isRightTypeBoundaryAt(text, end) {
+    if (end >= text.length) return true;
+    if (isRightTypeBoundary(text.charAt(end))) return true;
+    return text.startsWith('&lt;', end) || text.startsWith('&gt;', end);
+  }
+
+  /**
+   * Подсветка по «сырому» тексту (Foo&lt;Bar&gt; в сигнатуре), затем безопасный HTML.
+   * Не использовать highlight после escapeHtml — границы generics ломаются.
+   */
+  function highlightToSafeHtml(text, patterns) {
+    if (!text) return '';
+    if (!patterns.length) return escapeHtml(text);
+
     let out = '';
     let pos = 0;
+
     while (pos < text.length) {
       let best = null;
       for (const p of patterns) {
@@ -292,31 +311,15 @@
         }
       }
       if (!best) {
-        out += text.charAt(pos);
+        out += escapeHtml(text.charAt(pos));
         pos++;
       } else {
-        out += '<mark class="ctx-type" title="' + formatMarkTitle(best) + '">';
-        out += best.text;
-        out += '</mark>';
+        out += '<mark class="ctx-type" title="' + formatMarkTitle(best) + '">'
+            + escapeHtml(best.text) + '</mark>';
         pos += best.text.length;
       }
     }
     return out;
-  }
-
-  /** Экранирует текст, не трогая уже вставленные {@code <mark>}. */
-  function escapeHtmlOutsideMarks(text) {
-    if (!text) return '';
-    const re = /<mark class="ctx-type" title="([^"]*)">([\s\S]*?)<\/mark>/g;
-    let out = '';
-    let last = 0;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      out += escapeHtml(text.substring(last, m.index));
-      out += '<mark class="ctx-type" title="' + m[1] + '">' + escapeHtml(m[2]) + '</mark>';
-      last = m.lastIndex;
-    }
-    return out + escapeHtml(text.substring(last));
   }
 
   function simpleName(qn) {
