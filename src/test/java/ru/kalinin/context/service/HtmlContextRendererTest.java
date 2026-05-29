@@ -33,4 +33,10 @@ class HtmlContextRendererTest {
         assertThat(HtmlContextRenderer.escapeHtml("a < b & c"))
                 .isEqualTo("a &lt; b &amp; c");
     }
+
+    @Test
+    void stripToStringHeaderRemovesDuplicateMetaLine() {
+        String raw = "### com.foo.Bar  [level=1, id=2, callers=[3], module=main]  [unchanged]\n|  1|void m()";
+        assertThat(HtmlContextRenderer.stripToStringHeader(raw)).isEqualTo("|  1|void m()");
+    }
 }
