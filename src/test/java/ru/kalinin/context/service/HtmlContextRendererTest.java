@@ -47,6 +47,46 @@ class HtmlContextRendererTest {
     }
 
     @Test
+    void highlightsOnlyStandaloneTypeNotInsideIdentifier() {
+        List<HtmlContextRenderer.HighlightPattern> patterns =
+                HtmlContextRenderer.buildHighlightPatterns(Set.of("forms.credit.Документы"));
+
+        String line = "|    10|    private final Документы окноДокументы";
+        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
+
+        assertThat(highlighted).contains("final <mark class=\"ctx-type\"");
+        assertThat(highlighted).doesNotContain("окно<mark");
+        assertThat(highlighted).doesNotContain("окноДокументы</mark>");
+    }
+
+    @Test
+    void highlightsTypeAfterAtAndBeforeSemicolonOrBracket() {
+        List<HtmlContextRenderer.HighlightPattern> patterns =
+                HtmlContextRenderer.buildHighlightPatterns(Set.of("com.example.Foo"));
+
+        assertThat(HtmlContextRenderer.highlight(
+                HtmlContextRenderer.escapeHtml("@Foo void m();"), patterns))
+                .contains("<mark class=\"ctx-type\"");
+        assertThat(HtmlContextRenderer.highlight(
+                HtmlContextRenderer.escapeHtml("private Foo[] arr;"), patterns))
+                .contains("<mark class=\"ctx-type\"");
+        assertThat(HtmlContextRenderer.highlight(
+                HtmlContextRenderer.escapeHtml("void m(Foo p);"), patterns))
+                .contains("<mark class=\"ctx-type\"");
+    }
+
+    @Test
+    void doesNotHighlightSimpleNameInsideUnrelatedToken() {
+        List<HtmlContextRenderer.HighlightPattern> patterns =
+                HtmlContextRenderer.buildHighlightPatterns(Set.of("test.credit.T6553"));
+
+        String line = "|    20|    @TmsLink(\"ASDFG-T6553\")";
+        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
+
+        assertThat(highlighted).doesNotContain("ctx-type");
+    }
+
+    @Test
     void escapeHtmlEscapesSpecialChars() {
         assertThat(HtmlContextRenderer.escapeHtml("a < b & c"))
                 .isEqualTo("a &lt; b &amp; c");
