@@ -70,7 +70,7 @@
     classes.forEach((ctx, i) => {
       const index = i + 1;
       const sid = sectionId(index);
-      const body = highlight(escapeHtml(formatClassBody(ctx)), patterns);
+      const body = escapeHtmlOutsideMarks(highlight(formatClassBody(ctx), patterns));
       html += '<section class="ctx-block" id="' + sid + '"><h2>';
       html += '<span class="section-idx">#' + index + '</span>';
       html += classLinkHtml(sid, ctx);
@@ -226,18 +226,12 @@
 
   function buildHighlightPatterns(qualifiedNames, contextIdByName, nestedToRootTop) {
     if (!qualifiedNames.size) return [];
-    const simpleCounts = new Map();
-    for (const qn of qualifiedNames) {
-      const s = simpleName(qn);
-      simpleCounts.set(s, (simpleCounts.get(s) || 0) + 1);
-    }
     const textToQn = new Map();
-    for (const qn of qualifiedNames) {
-      putPattern(textToQn, qn, qn);
-      const two = twoSegmentSuffix(qn);
-      if (two) putPattern(textToQn, two, qn);
-      const simple = simpleName(qn);
-      if (simpleCounts.get(simple) === 1) putPattern(textToQn, simple, qn);
+    const sortedQns = [...qualifiedNames].sort((a, b) => b.length - a.length);
+    for (const qn of sortedQns) {
+      for (const suffix of dottedSuffixes(qn)) {
+        putPattern(textToQn, suffix, qn);
+      }
     }
     return [...textToQn.entries()]
         .sort((a, b) => b[0].length - a[0].length)
@@ -246,6 +240,15 @@
           qualifiedName,
           contextId: resolveContextId(qualifiedName, contextIdByName, nestedToRootTop),
         }));
+  }
+
+  /** Все суффиксы по точкам: a.b.C → [a.b.C, b.C, C]. */
+  function dottedSuffixes(qn) {
+    const suffixes = [qn];
+    for (let dot = qn.indexOf('.'); dot >= 0; dot = qn.indexOf('.', dot + 1)) {
+      suffixes.push(qn.substring(dot + 1));
+    }
+    return suffixes;
   }
 
   function formatMarkTitle(pattern) {
@@ -276,20 +279,20 @@
         || c === ';' || c === '[' || c === ':' || /\s/.test(c);
   }
 
-  function highlight(escapedText, patterns) {
-    if (!patterns.length || !escapedText) return escapedText;
+  function highlight(text, patterns) {
+    if (!patterns.length || !text) return text;
     let out = '';
     let pos = 0;
-    while (pos < escapedText.length) {
+    while (pos < text.length) {
       let best = null;
       for (const p of patterns) {
         const end = pos + p.text.length;
-        if (escapedText.startsWith(p.text, pos) && isTypeTokenAt(escapedText, pos, end)) {
+        if (text.startsWith(p.text, pos) && isTypeTokenAt(text, pos, end)) {
           if (!best || p.text.length > best.text.length) best = p;
         }
       }
       if (!best) {
-        out += escapedText.charAt(pos);
+        out += text.charAt(pos);
         pos++;
       } else {
         out += '<mark class="ctx-type" title="' + formatMarkTitle(best) + '">';
@@ -301,17 +304,24 @@
     return out;
   }
 
+  /** Экранирует текст, не трогая уже вставленные {@code <mark>}. */
+  function escapeHtmlOutsideMarks(text) {
+    if (!text) return '';
+    const re = /<mark class="ctx-type" title="([^"]*)">([\s\S]*?)<\/mark>/g;
+    let out = '';
+    let last = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      out += escapeHtml(text.substring(last, m.index));
+      out += '<mark class="ctx-type" title="' + m[1] + '">' + escapeHtml(m[2]) + '</mark>';
+      last = m.lastIndex;
+    }
+    return out + escapeHtml(text.substring(last));
+  }
+
   function simpleName(qn) {
     const dot = qn.lastIndexOf('.');
     return dot < 0 ? qn : qn.substring(dot + 1);
-  }
-
-  function twoSegmentSuffix(qn) {
-    const last = qn.lastIndexOf('.');
-    if (last <= 0) return null;
-    const prev = qn.lastIndexOf('.', last - 1);
-    if (prev < 0) return null;
-    return qn.substring(prev + 1);
   }
 
   function escapeHtml(text) {
