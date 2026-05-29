@@ -9,6 +9,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import ru.kalinin.context.model.ContextRequest;
@@ -17,6 +18,7 @@ import ru.kalinin.context.model.GitLabLinesRequest;
 import ru.kalinin.context.model.JarLinesRequest;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.service.ContextBuilderService;
+import ru.kalinin.context.service.HtmlContextRenderer;
 import ru.kalinin.context.service.SourceLinesService;
 
 import java.time.Duration;
@@ -30,6 +32,7 @@ import java.time.Instant;
 public class ContextController {
 
     private final ContextBuilderService contextBuilderService;
+    private final HtmlContextRenderer htmlContextRenderer;
     private final SourceLinesService sourceLinesService;
 
     // -------------------------------------------------------------------------
@@ -68,6 +71,35 @@ public class ContextController {
         log.info("Context built: {} classes analyzed   {} ms",
                 response.totalClassesAnalyzed(), Duration.between(start, Instant.now()).toMillis());
         return ResponseEntity.ok(response);
+    }
+
+    @Operation(
+            summary = "Построить контекст (HTML для отладки)",
+            description = """
+                    Те же параметры, что у POST /api/context. Вызывает buildContext и возвращает HTML:
+                    для каждого ClassContext — блок с toString(), типы зависимостей (level > 0)
+                    подсвечены в тексте.
+                    """
+    )
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "HTML-страница с контекстами"),
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema())),
+            @ApiResponse(responseCode = "500", description = "Ошибка GitLab API или парсинга",
+                    content = @Content(schema = @Schema()))
+    })
+    @PostMapping(value = "/context/html", produces = MediaType.TEXT_HTML_VALUE)
+    public ResponseEntity<String> getContextHtml(@Valid @RequestBody ContextRequest request) {
+        log.info("Building HTML debug context for MR !{} in project '{}', depth={}",
+                request.mergeRequestIid(), request.projectId(), request.depth());
+        Instant start = Instant.now();
+        ContextResponse response = contextBuilderService.buildContext(request);
+        String html = htmlContextRenderer.render(response);
+        log.info("HTML context built: {} classes   {} ms",
+                response.totalClassesAnalyzed(), Duration.between(start, Instant.now()).toMillis());
+        return ResponseEntity.ok()
+                .contentType(MediaType.TEXT_HTML)
+                .body(html);
     }
 
     // -------------------------------------------------------------------------

@@ -2,9 +2,11 @@ package ru.kalinin.context.parser;
 
 import org.junit.jupiter.api.Test;
 import ru.kalinin.context.model.ClassStructure;
+import ru.kalinin.context.parser.UnresolvedTypeRef;
 
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -137,7 +139,9 @@ class JavaStructureParserTest {
     @Test
     void collectsReferencedTypes() {
         List<ClassStructure> result = parser.parse(SIMPLE_CLASS, "UserService.java", 0);
-        Set<String> types = parser.collectReferencedTypes(result.get(0));
+        Set<String> types = parser.collectReferencedTypes(result.get(0)).stream()
+                .map(UnresolvedTypeRef::name)
+                .collect(Collectors.toSet());
 
         // Service аннотация и UserRepository теперь резолвится в qualified name
         assertThat(types).contains("Service", "com.example.UserRepository");
