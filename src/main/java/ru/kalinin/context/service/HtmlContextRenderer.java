@@ -29,9 +29,18 @@ public class HtmlContextRenderer {
             h1 { font-size: 1.25rem; }
             .meta { font-size: 0.9rem; color: #57606a; margin-bottom: 1rem; }
             .legend mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
+            .ctx-index { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; \
+            padding: 0.75rem 1rem; margin: 1rem 0; max-height: 16rem; overflow-y: auto; }
+            .ctx-index h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+            .ctx-index ol { margin: 0; padding-left: 1.5rem; }
+            .ctx-index li { margin: 0.2rem 0; }
+            .ctx-index a { color: #0969da; text-decoration: none; }
+            .ctx-index a:hover { text-decoration: underline; }
+            .ctx-index .idx-meta { color: #57606a; font-size: 0.85em; }
             .ctx-block { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; \
             margin: 1rem 0; padding: 0.75rem 1rem; }
             .ctx-block h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: #0969da; }
+            .ctx-block .section-idx { color: #57606a; font-weight: normal; margin-right: 0.35rem; }
             pre.ctx { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
             mark.ctx-type { background: #fff8c5; border-bottom: 1px solid #d4a72c; border-radius: 2px; \
             padding: 0 1px; }
@@ -56,9 +65,17 @@ public class HtmlContextRenderer {
         html.append("добавленные в контекст как зависимости (<code>level &gt; 0</code>, ");
         html.append(dependencyQNames.size()).append(" шт.).</p>");
 
-        for (ClassContext ctx : classes) {
-            html.append("<section class=\"ctx-block\"><h2>");
+        appendSectionIndex(html, classes);
+
+        for (int i = 0; i < classes.size(); i++) {
+            ClassContext ctx = classes.get(i);
+            int index = i + 1;
+            String sectionId = sectionId(index);
+            html.append("<section class=\"ctx-block\" id=\"").append(sectionId).append("\"><h2>");
+            html.append("<span class=\"section-idx\">#").append(index).append("</span>");
+            html.append("<a href=\"#").append(sectionId).append("\">");
             html.append(escapeHtml(ctx.name()));
+            html.append("</a>");
             html.append(" <span class=\"meta\">[level=").append(ctx.level());
             html.append(", id=").append(ctx.id()).append("]</span></h2>");
             html.append("<pre class=\"ctx\">");
@@ -68,6 +85,25 @@ public class HtmlContextRenderer {
 
         html.append("</body></html>");
         return html.toString();
+    }
+
+    private static void appendSectionIndex(StringBuilder html, List<ClassContext> classes) {
+        if (classes.isEmpty()) return;
+        html.append("<nav class=\"ctx-index\"><h2>Оглавление (").append(classes.size()).append(")</h2><ol>");
+        for (int i = 0; i < classes.size(); i++) {
+            ClassContext ctx = classes.get(i);
+            int index = i + 1;
+            String sectionId = sectionId(index);
+            html.append("<li><a href=\"#").append(sectionId).append("\">");
+            html.append(index).append(". ").append(escapeHtml(ctx.name()));
+            html.append("</a> <span class=\"idx-meta\">[level=").append(ctx.level());
+            html.append(", id=").append(ctx.id()).append("]</span></li>");
+        }
+        html.append("</ol></nav>");
+    }
+
+    private static String sectionId(int index) {
+        return "ctx-" + index;
     }
 
     private static void appendMeta(StringBuilder html, ContextResponse response) {
