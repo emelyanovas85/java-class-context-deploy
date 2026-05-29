@@ -30,17 +30,21 @@ public class HtmlContextRenderer {
             h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
             .meta { font-size: 0.9rem; color: #57606a; margin-bottom: 1rem; }
             .legend { margin: 0 0 0.75rem; }
-            .pin-toggle { display: block; padding: 0 1.5rem 0.75rem; font-size: 0.9rem; \
-            color: #57606a; cursor: pointer; user-select: none; }
-            .pin-toggle input { margin-right: 0.35rem; }
+            .page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; \
+            padding: 0 1.5rem 0.75rem; font-size: 0.9rem; color: #57606a; }
+            .page-toolbar label { cursor: pointer; user-select: none; display: inline-flex; \
+            align-items: center; gap: 0.35rem; }
+            .height-control input[type=range] { width: 10rem; vertical-align: middle; cursor: pointer; }
+            .height-value { min-width: 2.5rem; font-variant-numeric: tabular-nums; }
             .layout-body { padding: 0 1.5rem 1.5rem; }
             .layout-body.pinned { display: flex; flex-direction: column; \
             height: calc(100vh - 11rem); min-height: 12rem; overflow: hidden; }
             .legend mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
             .ctx-index { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; \
-            padding: 0.75rem 1rem; margin: 0 0 1rem; flex-shrink: 0; }
-            .layout-body:not(.pinned) .ctx-index { max-height: 16rem; overflow-y: auto; }
-            .layout-body.pinned .ctx-index { max-height: 38vh; overflow-y: auto; margin-bottom: 0.75rem; }
+            padding: 0.75rem 1rem; margin: 0 0 1rem; flex-shrink: 0; overflow: auto; \
+            resize: vertical; min-height: 5rem; max-height: var(--index-max-height, 38vh); }
+            .layout-body.pinned .ctx-index { height: var(--index-max-height, 38vh); \
+            max-height: var(--index-max-height, 38vh); margin-bottom: 0.75rem; }
             .ctx-index h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
             .ctx-index ol { margin: 0; padding-left: 1.5rem; }
             .ctx-index li { margin: 0.2rem 0; }
@@ -61,15 +65,38 @@ public class HtmlContextRenderer {
             padding: 0 1px; }
             """;
 
-    private static final String PIN_SCRIPT = """
+    private static final String LAYOUT_SCRIPT = """
             <script>
             (function () {
               var cb = document.getElementById('pin-index');
               var layout = document.getElementById('layout-body');
-              if (!cb || !layout) return;
-              function apply() { layout.classList.toggle('pinned', cb.checked); }
-              cb.addEventListener('change', apply);
-              apply();
+              var slider = document.getElementById('index-height');
+              var label = document.getElementById('index-height-value');
+              var KEY_PIN = 'ctx-index-pinned';
+              var KEY_HEIGHT = 'ctx-index-height-vh';
+              if (!layout) return;
+              if (cb) {
+                var savedPin = localStorage.getItem(KEY_PIN);
+                if (savedPin !== null) cb.checked = savedPin === '1';
+                function applyPin() {
+                  layout.classList.toggle('pinned', cb.checked);
+                  localStorage.setItem(KEY_PIN, cb.checked ? '1' : '0');
+                }
+                cb.addEventListener('change', applyPin);
+                applyPin();
+              }
+              if (slider && label) {
+                var savedH = localStorage.getItem(KEY_HEIGHT);
+                if (savedH !== null) slider.value = savedH;
+                function applyHeight() {
+                  var vh = slider.value;
+                  document.documentElement.style.setProperty('--index-max-height', vh + 'vh');
+                  label.textContent = vh + 'vh';
+                  localStorage.setItem(KEY_HEIGHT, vh);
+                }
+                slider.addEventListener('input', applyHeight);
+                applyHeight();
+              }
             })();
             </script>
             """;
@@ -92,8 +119,14 @@ public class HtmlContextRenderer {
         html.append("<p class=\"legend\">Подсветка <mark class=\"ctx-type\">жёлтым</mark> — типы, ");
         html.append("добавленные в контекст как зависимости (<code>level &gt; 0</code>, ");
         html.append(dependencyQNames.size()).append(" шт.).</p></header>");
-        html.append("<label class=\"pin-toggle\"><input type=\"checkbox\" id=\"pin-index\" checked>");
-        html.append("Закрепить оглавление (секции скроллятся ниже)</label>");
+        html.append("<div class=\"page-toolbar\">");
+        html.append("<label><input type=\"checkbox\" id=\"pin-index\" checked>");
+        html.append("Закрепить оглавление</label>");
+        html.append("<label class=\"height-control\">Высота оглавления ");
+        html.append("<input type=\"range\" id=\"index-height\" min=\"10\" max=\"75\" value=\"38\" step=\"1\">");
+        html.append("<span class=\"height-value\" id=\"index-height-value\">38vh</span></label>");
+        html.append("<span>или потяните нижний край блока</span>");
+        html.append("</div>");
         html.append("<div class=\"layout-body pinned\" id=\"layout-body\">");
         appendSectionIndex(html, classes);
         html.append("<main class=\"ctx-sections\">");
@@ -111,7 +144,7 @@ public class HtmlContextRenderer {
         }
 
         html.append("</main></div>");
-        html.append(PIN_SCRIPT);
+        html.append(LAYOUT_SCRIPT);
         html.append("</body></html>");
         return html.toString();
     }
