@@ -12,7 +12,10 @@
   const classes = DATA.classes || [];
 
   const allQualifiedNames = collectAllQualifiedNames(classes);
-  const highlightPatterns = buildHighlightPatterns(allQualifiedNames);
+  const contextIdByName = buildContextIdByName(classes);
+  const nestedToRootTop = buildNestedToRootTopLevel(classes);
+  const highlightPatterns = buildHighlightPatterns(
+      allQualifiedNames, contextIdByName, nestedToRootTop);
 
   document.getElementById('type-count').textContent = String(allQualifiedNames.size);
   renderMeta(DATA);
@@ -117,6 +120,56 @@
     return qnames;
   }
 
+  function buildContextIdByName(classes) {
+    const map = new Map();
+    for (const ctx of classes) {
+      map.set(ctx.name, ctx.id);
+    }
+    return map;
+  }
+
+  /** nested qualified name → top-level outer qualified name (контекст файла). */
+  function buildNestedToRootTopLevel(classes) {
+    const map = new Map();
+    for (const ctx of classes) {
+      for (const roots of structureRoots(ctx)) {
+        mapNestedToRootTop(roots, ctx.name, map);
+      }
+    }
+    return map;
+  }
+
+  function mapNestedToRootTop(nodes, rootTopQn, map) {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (isTypeNode(node)) {
+        const simple = simpleNameFromSignature(node.signature, node.type);
+        const isOuterShell = simple && simple === simpleName(rootTopQn);
+        if (simple && !isOuterShell) {
+          const nestedQn = rootTopQn + '.' + simple;
+          map.set(nestedQn, rootTopQn);
+          if (node.children) mapNestedToRootTop(node.children, rootTopQn, map);
+        } else if (node.children) {
+          mapNestedToRootTop(node.children, rootTopQn, map);
+        }
+      } else if (node.children) {
+        mapNestedToRootTop(node.children, rootTopQn, map);
+      }
+    }
+  }
+
+  /** id контекста: для nested всегда id top-level outer, иначе свой. */
+  function resolveContextId(qualifiedName, contextIdByName, nestedToRootTop) {
+    const root = nestedToRootTop.get(qualifiedName);
+    if (root && contextIdByName.has(root)) {
+      return contextIdByName.get(root);
+    }
+    if (contextIdByName.has(qualifiedName)) {
+      return contextIdByName.get(qualifiedName);
+    }
+    return undefined;
+  }
+
   function structureRoots(ctx) {
     if (ctx.kind === 'unchanged' || (ctx.structure && !ctx.structureSource)) {
       return ctx.structure ? [ctx.structure] : [];
@@ -171,7 +224,7 @@
     return parts.length ? parts[parts.length - 1] : null;
   }
 
-  function buildHighlightPatterns(qualifiedNames) {
+  function buildHighlightPatterns(qualifiedNames, contextIdByName, nestedToRootTop) {
     if (!qualifiedNames.size) return [];
     const simpleCounts = new Map();
     for (const qn of qualifiedNames) {
@@ -188,7 +241,20 @@
     }
     return [...textToQn.entries()]
         .sort((a, b) => b[0].length - a[0].length)
-        .map(([text, qualifiedName]) => ({ text, qualifiedName }));
+        .map(([text, qualifiedName]) => ({
+          text,
+          qualifiedName,
+          contextId: resolveContextId(qualifiedName, contextIdByName, nestedToRootTop),
+        }));
+  }
+
+  function formatMarkTitle(pattern) {
+    const qn = pattern.qualifiedName;
+    const id = pattern.contextId;
+    if (id !== undefined && id !== null) {
+      return escapeHtml(qn + ' (id=' + id + ')');
+    }
+    return escapeHtml(qn);
   }
 
   function putPattern(map, text, qn) {
@@ -226,7 +292,7 @@
         out += escapedText.charAt(pos);
         pos++;
       } else {
-        out += '<mark class="ctx-type" title="' + escapeHtml(best.qualifiedName) + '">';
+        out += '<mark class="ctx-type" title="' + formatMarkTitle(best) + '">';
         out += best.text;
         out += '</mark>';
         pos += best.text.length;
