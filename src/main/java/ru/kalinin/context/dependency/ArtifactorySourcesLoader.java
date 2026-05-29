@@ -235,8 +235,7 @@ public class ArtifactorySourcesLoader {
      */
     private void saveMetadataSnapshot(String group, String module, String xml) {
         String safeName = group.replace('.', '_') + "__" + module;
-        String timestamp = String.valueOf(System.currentTimeMillis());
-        Path localPath = artifactsDir.resolve("metadata__" + safeName + "__" + timestamp + ".xml");
+        Path localPath = artifactsDir.resolve("metadata__" + safeName + ".xml");
         try {
             Files.writeString(localPath, xml,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);

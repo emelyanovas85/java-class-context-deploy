@@ -13,7 +13,7 @@ h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
 .layout-body:not(.pinned) .ctx-index { max-height: 38vh; }
 .ctx-index h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
 .ctx-index ol { margin: 0; padding-left: 1.5rem; }
-.ctx-index li { margin: 0.2rem 0; }
+.ctx-index li { margin: 0.2rem 0; margin-left: 10px; }
 .ctx-index a { color: #0969da; text-decoration: none; }
 .ctx-index a:hover { text-decoration: underline; }
 .ctx-sections { min-height: 0; }
@@ -22,6 +22,6 @@ h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
 .layout-body.pinned .ctx-block:first-child { margin-top: 0; }
 .ctx-block h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: #0969da; }
 .ctx-block .section-idx { color: #57606a; font-weight: normal; margin-right: 0.35rem; }
-.ctx-meta { color: #57606a; font-size: 0.85em; font-weight: normal; }
+.ctx-meta { color: #57606a; font-size: 0.75em; font-weight: normal; }
 pre.ctx { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
 mark.ctx-type { background: #fff8c5; border-bottom: 1px solid #d4a72c; border-radius: 2px; padding: 0 1px; cursor: help; }
