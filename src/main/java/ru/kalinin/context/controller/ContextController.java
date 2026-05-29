@@ -76,9 +76,8 @@ public class ContextController {
     @Operation(
             summary = "Построить контекст (HTML для отладки)",
             description = """
-                    Те же параметры, что у POST /api/context. Вызывает buildContext и возвращает HTML:
-                    для каждого ClassContext — блок с toString(), типы зависимостей (level > 0)
-                    подсвечены в тексте.
+                    Те же параметры, что у POST /api/context. Возвращает HTML-шаблон
+                    с JSON (ContextResponse) и клиентским рендером (/context-debug.js).
                     """
     )
     @ApiResponses({
