@@ -60,6 +60,19 @@ class HtmlContextRendererTest {
     }
 
     @Test
+    void highlightsAnnotationTypeBeforeParenthesis() {
+        List<HtmlContextRenderer.HighlightPattern> patterns =
+                HtmlContextRenderer.buildHighlightPatterns(Set.of("javax.persistence.Version"));
+
+        String line = "|    1|@Version(\"1.0\")\n|    2|    private String id";
+        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
+
+        assertThat(highlighted)
+                .contains("title=\"javax.persistence.Version\"")
+                .contains("Version</mark>(&quot;1.0&quot;)");
+    }
+
+    @Test
     void highlightsTypeAfterAtAndBeforeSemicolonOrBracket() {
         List<HtmlContextRenderer.HighlightPattern> patterns =
                 HtmlContextRenderer.buildHighlightPatterns(Set.of("com.example.Foo"));

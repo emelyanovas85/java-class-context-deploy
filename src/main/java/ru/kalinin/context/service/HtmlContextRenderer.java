@@ -302,7 +302,7 @@ public class HtmlContextRenderer {
 
     /**
      * Тип в сигнатуре — не подстрока идентификатора.
-     * Слева: {@code @ , < ( [} или пробел; справа: {@code . > , ) ] ; [ :} или пробел.
+     * Слева: {@code @ , < ( [} или пробел; справа: {@code . > , ) ] ; [ : (} или пробел.
      */
     static boolean isTypeTokenAt(String text, int start, int end) {
         boolean leftOk = start == 0 || isLeftTypeBoundary(text.charAt(start - 1));
@@ -316,8 +316,8 @@ public class HtmlContextRenderer {
     }
 
     private static boolean isRightTypeBoundary(char c) {
-        return c == '.' || c == '>' || c == ',' || c == ')' || c == ']' || c == ';'
-                || c == '[' || c == ':' || Character.isWhitespace(c);
+        return c == '.' || c == '>' || c == ',' || c == ')' || c == '(' || c == ']'
+                || c == ';' || c == '[' || c == ':' || Character.isWhitespace(c);
     }
 
     static String highlight(String escapedText, List<HighlightPattern> patterns) {
