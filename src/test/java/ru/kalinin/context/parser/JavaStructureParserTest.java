@@ -62,6 +62,17 @@ class JavaStructureParserTest {
             }
             """;
 
+    private static final String SIBLING_CLASSES = """
+            package com.example;
+
+            public class A {
+                void use(B b) {}
+            }
+            class B {
+                int x;
+            }
+            """;
+
     @Test
     void parsesSimpleClass() {
         List<ClassStructure> result = parser.parse(SIMPLE_CLASS, "UserService.java", 0);
@@ -134,6 +145,23 @@ class JavaStructureParserTest {
         ClassStructure outer = result.get(0);
         assertThat(outer.nestedClasses()).hasSize(1);
         assertThat(outer.nestedClasses().get(0).name()).isEqualTo("Inner");
+    }
+
+    @Test
+    void parsesPackagePrivateSiblingTopLevelClass() {
+        List<ClassStructure> result = parser.parse(SIBLING_CLASSES, "A.java", 0);
+
+        assertThat(result).hasSize(2);
+        assertThat(result).extracting(ClassStructure::qualifiedName)
+                .containsExactly("com.example.A", "com.example.B");
+        assertThat(result.get(1).modifiers()).doesNotContain("public");
+    }
+
+    @Test
+    void containsTopLevelType_findsPackagePrivateSibling() {
+        assertThat(parser.containsTopLevelType(SIBLING_CLASSES, "B")).isTrue();
+        assertThat(parser.containsTopLevelType(SIBLING_CLASSES, "A")).isTrue();
+        assertThat(parser.containsTopLevelType(SIBLING_CLASSES, "Missing")).isFalse();
     }
 
     @Test

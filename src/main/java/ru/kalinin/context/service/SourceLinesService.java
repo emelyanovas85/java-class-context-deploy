@@ -10,6 +10,7 @@ import ru.kalinin.context.model.GitLabLinesRequest;
 import ru.kalinin.context.model.JarLinesRequest;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.model.SourceLinesResponse.FileResult;
+import ru.kalinin.context.parser.JavaStructureParser;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +32,7 @@ public class SourceLinesService {
 
     private final GitLabService gitLabService;
     private final DependencyClassNameExtractor classNameExtractor;
+    private final JavaStructureParser structureParser;
 
     @Value("${app.artifacts-dir:artifacts}")
     private String artifactsDirPath;
@@ -53,7 +55,7 @@ public class SourceLinesService {
         String qName = classLines.qualifiedName();
         String pathPrefix = classLines.sourcePathPrefix();
 
-        Optional<String> filePath = findWithSourceHint(index, qName, pathPrefix);
+        Optional<String> filePath = resolveGitLabFilePath(request, index, qName, pathPrefix);
         if (filePath.isEmpty()) {
             log.warn("Class not found in index: {} (source={})", qName, classLines.source());
             return FileResult.ofError(qName,
@@ -78,6 +80,35 @@ public class SourceLinesService {
         }
 
         return toFileResult(qName, content.get(), classLines.rows());
+    }
+
+    private Optional<String> resolveGitLabFilePath(GitLabLinesRequest request,
+                                                   Map<String, List<String>> index,
+                                                   String qualifiedName,
+                                                   String pathPrefix) {
+        Optional<String> direct = findWithSourceHint(index, qualifiedName, pathPrefix);
+        if (direct.isPresent()) return direct;
+
+        int lastDot = qualifiedName.lastIndexOf('.');
+        if (lastDot < 0) return Optional.empty();
+        String packageName = qualifiedName.substring(0, lastDot);
+        String simpleName = qualifiedName.substring(lastDot + 1);
+
+        for (String candidatePath : gitLabService.listJavaFilesInPackage(index, packageName)) {
+            try {
+                Optional<String> content = gitLabService.readRawFileContent(
+                        request.gitlabUrl(), request.token(),
+                        request.projectId(), request.ref(), candidatePath);
+                if (content.isPresent()
+                        && structureParser.containsTopLevelType(content.get(), simpleName)) {
+                    log.debug("Resolved {} via package scan in {}", qualifiedName, candidatePath);
+                    return Optional.of(candidatePath);
+                }
+            } catch (RuntimeException e) {
+                log.debug("Skip {} while resolving {}: {}", candidatePath, qualifiedName, e.getMessage());
+            }
+        }
+        return Optional.empty();
     }
 
     private Optional<String> findWithSourceHint(Map<String, List<String>> index,

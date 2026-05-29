@@ -195,6 +195,30 @@ public class GitLabService {
     }
 
     /**
+     * Все пути к {@code .java}-файлам в указанном пакете (по merged/raw-индексу).
+     * Нужен для package-private top-level типов, живущих в файле с другим именем
+     * (например {@code class B {}} в {@code A.java}).
+     */
+    public List<String> listJavaFilesInPackage(Map<String, List<String>> fileIndex, String packageName) {
+        if (packageName == null || packageName.isBlank()) {
+            return List.of();
+        }
+        String packagePath = packageName.replace('.', '/') + "/";
+        List<String> paths = new ArrayList<>();
+        for (List<String> group : fileIndex.values()) {
+            for (String path : group) {
+                if (!path.endsWith(".java")) continue;
+                String afterSourceRoot = pathAfterJavaSourceRoot(path);
+                if (afterSourceRoot != null && afterSourceRoot.startsWith(packagePath)) {
+                    paths.add(path);
+                }
+            }
+        }
+        paths.sort(String::compareTo);
+        return paths;
+    }
+
+    /**
      * Строит raw-индекс для ветки, используя кэш.
      *
      * <p>При попадании — возвращает из кэша без запроса к GitLab.
@@ -251,5 +275,16 @@ public class GitLabService {
     private static String fileName(String path) {
         int slash = path.lastIndexOf('/');
         return slash < 0 ? path : path.substring(slash + 1);
+    }
+
+    /** Путь относительно {@code src/.../java/} или {@code null}, если это не Java-исходник. */
+    static String pathAfterJavaSourceRoot(String filePath) {
+        for (String prefix : List.of("src/main/java/", "src/test/java/", "src/main/kotlin/")) {
+            int idx = filePath.indexOf(prefix);
+            if (idx >= 0) {
+                return filePath.substring(idx + prefix.length());
+            }
+        }
+        return null;
     }
 }

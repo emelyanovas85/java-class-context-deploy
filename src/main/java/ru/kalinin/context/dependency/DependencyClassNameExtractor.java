@@ -1,15 +1,20 @@
 package ru.kalinin.context.dependency;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import ru.kalinin.context.parser.JavaStructureParser;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -17,8 +22,8 @@ import java.util.zip.ZipInputStream;
  * Извлекает полные имена Java-классов из {@code *-sources.jar} на диске
  * и читает исходный код отдельного класса по qualified name.
  *
- * <p>Qualified name вычисляется из пути к {@code .java}-файлу внутри jar:
- * {@code com/example/Foo.java} → {@code com.example.Foo}.
+ * <p>Для каждого {@code .java}-файла в jar индексируются <b>все</b> top-level типы
+ * (в т.ч. package-private «соседи» в том же файле, что и public-класс).
  *
  * <p>Вложенные классы в индекс не попадают — только top-level.
  * При запросе по имени вложенного класса (e.g. {@code userInterface.ComplexTable.Row})
@@ -26,7 +31,13 @@ import java.util.zip.ZipInputStream;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class DependencyClassNameExtractor {
+
+    private final JavaStructureParser structureParser;
+
+    /** jarPath → (qualified name → zip entry path) */
+    private final Map<Path, Map<String, String>> jarTypeIndexCache = new ConcurrentHashMap<>();
 
     /**
      * Читает jar с диска и возвращает множество qualified names всех top-level классов.
@@ -36,36 +47,16 @@ public class DependencyClassNameExtractor {
      * @return множество qualified names
      */
     public Set<String> extractClassNames(Path jarPath, String depLabel) {
-        Set<String> classNames = new HashSet<>();
-        try (ZipInputStream zip = openZip(jarPath)) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                String name = entry.getName();
-                if (!entry.isDirectory() && name.endsWith(".java")) {
-                    String qualifiedName = toQualifiedName(name);
-                    if (qualifiedName != null) {
-                        classNames.add(qualifiedName);
-                    }
-                }
-            }
-        } catch (IOException e) {
-            log.warn("Failed to read sources.jar for {}: {}", depLabel, e.getMessage());
-        }
-        log.info("Extracted {} class names from sources.jar of {}", classNames.size(), depLabel);
-        return classNames;
+        return new HashSet<>(getOrBuildJarTypeIndex(jarPath, depLabel).keySet());
     }
 
     /**
      * Читает jar с диска и возвращает содержимое {@code .java}-файла
      * для указанного qualified name.
      *
-     * <p>Если файл не найден напрямую, метод последовательно отрезает последний
-     * сегмент через {@code .}, пытаясь найти родительский top-level класс.
-     * Например:
-     * <pre>
-     *   userInterface.ComplexTable.Row  →  userInterface/ComplexTable/Row.java  (не найден)
-     *                                  →  userInterface/ComplexTable.java       (найден)
-     * </pre>
+     * <p>Сначала ищет тип в полном индексе top-level типов jar (включая package-private
+     * «соседей»). Затем — по пути {@code QualifiedName.java} с подъёмом по outer-классам
+     * для nested-типов.
      *
      * @param jarPath       путь к jar-файлу на диске
      * @param qualifiedName например {@code org.springframework.web.bind.annotation.RestController}
@@ -73,6 +64,12 @@ public class DependencyClassNameExtractor {
      * @return содержимое .java файла или {@code Optional.empty()} если не найдено
      */
     public Optional<String> extractSourceFile(Path jarPath, String qualifiedName) {
+        Map<String, String> typeIndex = getOrBuildJarTypeIndex(jarPath, "lookup");
+        String entryPath = typeIndex.get(qualifiedName);
+        if (entryPath != null) {
+            return readEntry(jarPath, entryPath);
+        }
+
         String candidate = qualifiedName;
         while (!candidate.isEmpty()) {
             String targetEntry = candidate.replace('.', '/') + ".java";
@@ -94,6 +91,43 @@ public class DependencyClassNameExtractor {
     // Helpers
     // -------------------------------------------------------------------------
 
+    private Map<String, String> getOrBuildJarTypeIndex(Path jarPath, String depLabel) {
+        return jarTypeIndexCache.computeIfAbsent(jarPath, path -> buildJarTypeIndex(path, depLabel));
+    }
+
+    private Map<String, String> buildJarTypeIndex(Path jarPath, String depLabel) {
+        Map<String, String> index = new HashMap<>();
+        try (ZipInputStream zip = openZip(jarPath)) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (entry.isDirectory() || !name.endsWith(".java")) continue;
+                if (name.endsWith("module-info.java") || name.endsWith("package-info.java")) continue;
+
+                String content = new String(zip.readAllBytes());
+                indexTopLevelTypesInSource(content, name, index);
+            }
+        } catch (IOException e) {
+            log.warn("Failed to read sources.jar for {}: {}", depLabel, e.getMessage());
+        }
+        log.info("Indexed {} top-level types from sources.jar of {}", index.size(), depLabel);
+        return index;
+    }
+
+    private void indexTopLevelTypesInSource(String content, String entryPath, Map<String, String> index) {
+        String packageName = packageFromEntryPath(entryPath);
+        for (String simpleName : structureParser.topLevelTypeSimpleNames(content)) {
+            String qName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+            index.putIfAbsent(qName, entryPath);
+        }
+    }
+
+    private static String packageFromEntryPath(String entryPath) {
+        int slash = entryPath.lastIndexOf('/');
+        if (slash < 0) return "";
+        return entryPath.substring(0, slash).replace('/', '.');
+    }
+
     private Optional<String> readEntry(Path jarPath, String targetEntry) {
         try (ZipInputStream zip = openZip(jarPath)) {
             ZipEntry entry;
@@ -110,20 +144,5 @@ public class DependencyClassNameExtractor {
 
     private ZipInputStream openZip(Path jarPath) throws IOException {
         return new ZipInputStream(Files.newInputStream(jarPath));
-    }
-
-    /**
-     * Преобразует путь внутри zip в qualified name.
-     * Возвращает {@code null} для module-info и package-info.
-     */
-    private static String toQualifiedName(String entryName) {
-        String qName = entryName
-                .replace('/', '.')
-                .replace('\\', '.')
-                .replaceAll("\\.java$", "");
-        if (qName.endsWith("module-info") || qName.endsWith("package-info")) {
-            return null;
-        }
-        return qName;
     }
 }

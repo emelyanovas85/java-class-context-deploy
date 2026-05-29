@@ -106,6 +106,30 @@ public class JavaStructureParser {
     }
 
     /**
+     * Проверяет, объявлен ли top-level тип с данным simple name в исходнике.
+     * Используется для поиска package-private «соседей» в том же .java-файле,
+     * когда {@code SimpleName.java} не существует как отдельный файл.
+     */
+    public boolean containsTopLevelType(String sourceCode, String simpleName) {
+        return topLevelTypeSimpleNames(sourceCode).contains(simpleName);
+    }
+
+    /**
+     * Simple names всех top-level типов в исходнике (порядок как в {@link CompilationUnit#getTypes()}).
+     */
+    public List<String> topLevelTypeSimpleNames(String sourceCode) {
+        ParseResult<CompilationUnit> result = new JavaParser(parserConfig).parse(sourceCode);
+        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        for (TypeDeclaration<?> typeDecl : result.getResult().get().getTypes()) {
+            names.add(typeDecl.getNameAsString());
+        }
+        return names;
+    }
+
+    /**
      * Собирает все типы, на которые ссылается {@link ClassStructure},
      * оборачивая каждый в {@link UnresolvedTypeRef} с wildcardImports из структуры.
      *

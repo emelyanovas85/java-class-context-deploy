@@ -816,10 +816,38 @@ public class ContextBuilderService {
             String qName,
             Map<String, List<String>> fileIndex,
             String gitlabUrl, String token, String projectId, String branch) {
-        return gitLabService.findJavaFileByQualifiedName(fileIndex, qName)
-                .flatMap(filePath -> gitLabService.readFileContent(
-                        gitlabUrl, token, projectId, branch, filePath)
-                        .map(content -> Map.entry(filePath, content)));
+        Optional<String> filePath = gitLabService.findJavaFileByQualifiedName(fileIndex, qName);
+        if (filePath.isPresent()) {
+            return gitLabService.readFileContent(
+                            gitlabUrl, token, projectId, branch, filePath.get())
+                    .map(content -> Map.entry(filePath.get(), content));
+        }
+        return findTopLevelTypeInPackage(qName, fileIndex, gitlabUrl, token, projectId, branch);
+    }
+
+    /**
+     * Ищет top-level тип по qualified name среди всех .java файлов его пакета.
+     * Нужен для package-private классов в том же файле, что и public (например {@code B} в {@code A.java}).
+     */
+    private Optional<Map.Entry<String, String>> findTopLevelTypeInPackage(
+            String qName,
+            Map<String, List<String>> fileIndex,
+            String gitlabUrl, String token, String projectId, String branch) {
+        int lastDot = qName.lastIndexOf('.');
+        if (lastDot < 0) return Optional.empty();
+        String packageName = qName.substring(0, lastDot);
+        String simpleName = qName.substring(lastDot + 1);
+
+        for (String candidatePath : gitLabService.listJavaFilesInPackage(fileIndex, packageName)) {
+            Optional<String> content = gitLabService.readFileContent(
+                    gitlabUrl, token, projectId, branch, candidatePath);
+            if (content.isPresent()
+                    && structureParser.containsTopLevelType(content.get(), simpleName)) {
+                log.debug("Type '{}' resolved via package scan in {}", qName, candidatePath);
+                return Optional.of(Map.entry(candidatePath, content.get()));
+            }
+        }
+        return Optional.empty();
     }
 
     // ── Wildcard resolver ───────────────────────────────────────────────────────────
