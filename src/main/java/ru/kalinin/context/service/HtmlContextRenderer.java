@@ -300,6 +300,26 @@ public class HtmlContextRenderer {
         textToQn.putIfAbsent(text, qualifiedName);
     }
 
+    /**
+     * Тип в сигнатуре — не подстрока идентификатора.
+     * Слева: {@code @ , < ( [} или пробел; справа: {@code . > , ) ] ; [ :} или пробел.
+     */
+    static boolean isTypeTokenAt(String text, int start, int end) {
+        boolean leftOk = start == 0 || isLeftTypeBoundary(text.charAt(start - 1));
+        boolean rightOk = end >= text.length() || isRightTypeBoundary(text.charAt(end));
+        return leftOk && rightOk;
+    }
+
+    private static boolean isLeftTypeBoundary(char c) {
+        return c == '@' || c == ',' || c == '<' || c == '(' || c == '['
+                || Character.isWhitespace(c);
+    }
+
+    private static boolean isRightTypeBoundary(char c) {
+        return c == '.' || c == '>' || c == ',' || c == ')' || c == ']' || c == ';'
+                || c == '[' || c == ':' || Character.isWhitespace(c);
+    }
+
     static String highlight(String escapedText, List<HighlightPattern> patterns) {
         if (patterns.isEmpty() || escapedText.isEmpty()) return escapedText;
 
@@ -309,7 +329,9 @@ public class HtmlContextRenderer {
             HighlightPattern best = null;
             for (HighlightPattern p : patterns) {
                 String text = p.text();
+                int end = pos + text.length();
                 if (escapedText.startsWith(text, pos)
+                        && isTypeTokenAt(escapedText, pos, end)
                         && (best == null || text.length() > best.text().length())) {
                     best = p;
                 }
