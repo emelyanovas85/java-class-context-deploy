@@ -1,10 +1,10 @@
 package ru.kalinin.context.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-import ru.kalinin.context.model.ClassContext;
-import ru.kalinin.context.model.StructureNode;
+import ru.kalinin.context.model.ContextResponse;
+import ru.kalinin.context.model.UnchangedClassContext;
 
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -12,102 +12,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HtmlContextRendererTest {
 
-    private static final String OUTER = "forms.credit.Ценные_бумаги";
-    private static final String INNER = OUTER + ".Ввод_новой";
-
     @Test
-    void highlightsWithQualifiedNameTooltip() {
-        Set<String> types = new LinkedHashSet<>(List.of(INNER, OUTER));
-        List<HtmlContextRenderer.HighlightPattern> patterns =
-                HtmlContextRenderer.buildHighlightPatterns(types);
+    void injectsSerializedContextIntoTemplate() {
+        HtmlContextRenderer renderer = new HtmlContextRenderer(new ObjectMapper());
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new UnchangedClassContext(
+                        1, "com.example.Foo", 0, Set.of(), "main", List.of())),
+                2,
+                1);
 
-        String line = "|    49|    private Ценные_бумаги.Ввод_новой ввод_новой_записи";
-        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
+        String html = renderer.render(response);
 
-        assertThat(highlighted).contains("title=\"" + INNER + "\"");
-        assertThat(highlighted).contains("Ценные_бумаги.Ввод_новой");
-    }
-
-    @Test
-    void collectAllQualifiedNamesIncludesNestedFromStructure() {
-        StructureNode inner = new StructureNode(
-                "class", "public static class Ввод_новой", "10-20",
-                List.of(new StructureNode("field", "private String x", "12", null)));
-        StructureNode outer = new StructureNode(
-                "class", "public class Ценные_бумаги", "1-100",
-                List.of(inner));
-
-        ClassContext ctx = ClassContext.of(
-                1, Set.of(), OUTER, 1, "main",
-                List.of(outer), List.of(outer));
-
-        Set<String> names = HtmlContextRenderer.collectAllQualifiedNames(List.of(ctx));
-
-        assertThat(names).contains(OUTER, INNER);
-    }
-
-    @Test
-    void highlightsOnlyStandaloneTypeNotInsideIdentifier() {
-        List<HtmlContextRenderer.HighlightPattern> patterns =
-                HtmlContextRenderer.buildHighlightPatterns(Set.of("forms.credit.Документы"));
-
-        String line = "|    10|    private final Документы окноДокументы";
-        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
-
-        assertThat(highlighted).contains("final <mark class=\"ctx-type\"");
-        assertThat(highlighted).doesNotContain("окно<mark");
-        assertThat(highlighted).doesNotContain("окноДокументы</mark>");
-    }
-
-    @Test
-    void highlightsAnnotationTypeBeforeParenthesis() {
-        List<HtmlContextRenderer.HighlightPattern> patterns =
-                HtmlContextRenderer.buildHighlightPatterns(Set.of("javax.persistence.Version"));
-
-        String line = "|    1|@Version(\"1.0\")\n|    2|    private String id";
-        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
-
-        assertThat(highlighted)
-                .contains("title=\"javax.persistence.Version\"")
-                .contains("Version</mark>(&quot;1.0&quot;)");
-    }
-
-    @Test
-    void highlightsTypeAfterAtAndBeforeSemicolonOrBracket() {
-        List<HtmlContextRenderer.HighlightPattern> patterns =
-                HtmlContextRenderer.buildHighlightPatterns(Set.of("com.example.Foo"));
-
-        assertThat(HtmlContextRenderer.highlight(
-                HtmlContextRenderer.escapeHtml("@Foo void m();"), patterns))
-                .contains("<mark class=\"ctx-type\"");
-        assertThat(HtmlContextRenderer.highlight(
-                HtmlContextRenderer.escapeHtml("private Foo[] arr;"), patterns))
-                .contains("<mark class=\"ctx-type\"");
-        assertThat(HtmlContextRenderer.highlight(
-                HtmlContextRenderer.escapeHtml("void m(Foo p);"), patterns))
-                .contains("<mark class=\"ctx-type\"");
-    }
-
-    @Test
-    void doesNotHighlightSimpleNameInsideUnrelatedToken() {
-        List<HtmlContextRenderer.HighlightPattern> patterns =
-                HtmlContextRenderer.buildHighlightPatterns(Set.of("test.credit.T6553"));
-
-        String line = "|    20|    @TmsLink(\"ASDFG-T6553\")";
-        String highlighted = HtmlContextRenderer.highlight(HtmlContextRenderer.escapeHtml(line), patterns);
-
-        assertThat(highlighted).doesNotContain("ctx-type");
-    }
-
-    @Test
-    void escapeHtmlEscapesSpecialChars() {
-        assertThat(HtmlContextRenderer.escapeHtml("a < b & c"))
-                .isEqualTo("a &lt; b &amp; c");
-    }
-
-    @Test
-    void stripToStringHeaderRemovesDuplicateMetaLine() {
-        String raw = "### com.foo.Bar  [level=1, id=2, callers=[3], module=main]  [unchanged]\n|  1|void m()";
-        assertThat(HtmlContextRenderer.stripToStringHeader(raw)).isEqualTo("|  1|void m()");
+        assertThat(html).doesNotContain("__CONTEXT_JSON__");
+        assertThat(html).doesNotContain("__CONTEXT_CSS__");
+        assertThat(html).doesNotContain("__CONTEXT_JS__");
+        assertThat(html).contains("<script type=\"application/json\" id=\"ctx-data\">");
+        assertThat(html).contains("\"kind\":\"unchanged\"");
+        assertThat(html).contains("com.example.Foo");
+        assertThat(html).contains("<style>");
+        assertThat(html).contains(".ctx-block");
+        assertThat(html).contains("function collectAllQualifiedNames");
+        assertThat(html).doesNotContain("href=\"/context-debug.css\"");
+        assertThat(html).doesNotContain("src=\"/context-debug.js\"");
     }
 }

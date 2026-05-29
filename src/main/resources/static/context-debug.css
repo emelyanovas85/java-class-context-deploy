@@ -1,0 +1,27 @@
+body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 0; background: #f6f8fa; color: #1f2328; }
+.page-header { padding: 1.5rem 1.5rem 0; }
+h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+.meta { font-size: 0.9rem; color: #57606a; margin-bottom: 1rem; }
+.legend { margin: 0 0 0.75rem; }
+.page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; padding: 0 1.5rem 0.75rem; font-size: 0.9rem; color: #57606a; }
+.page-toolbar label { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 0.35rem; }
+.layout-body { padding: 0 1.5rem 1.5rem; }
+.layout-body.pinned { display: flex; flex-direction: column; height: calc(100vh - 11rem); min-height: 12rem; overflow: hidden; }
+.legend mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
+.ctx-index { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem 1rem; margin: 0 0 1rem; flex-shrink: 0; overflow: auto; resize: vertical; min-height: 5rem; max-height: 75vh; }
+.layout-body.pinned .ctx-index { height: 38vh; margin-bottom: 0.75rem; }
+.layout-body:not(.pinned) .ctx-index { max-height: 38vh; }
+.ctx-index h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+.ctx-index ol { margin: 0; padding-left: 1.5rem; }
+.ctx-index li { margin: 0.2rem 0; }
+.ctx-index a { color: #0969da; text-decoration: none; }
+.ctx-index a:hover { text-decoration: underline; }
+.ctx-sections { min-height: 0; }
+.layout-body.pinned .ctx-sections { flex: 1 1 auto; overflow-y: auto; padding-right: 0.25rem; }
+.ctx-block { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; margin: 1rem 0; padding: 0.75rem 1rem; }
+.layout-body.pinned .ctx-block:first-child { margin-top: 0; }
+.ctx-block h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: #0969da; }
+.ctx-block .section-idx { color: #57606a; font-weight: normal; margin-right: 0.35rem; }
+.ctx-meta { color: #57606a; font-size: 0.85em; font-weight: normal; }
+pre.ctx { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+mark.ctx-type { background: #fff8c5; border-bottom: 1px solid #d4a72c; border-radius: 2px; padding: 0 1px; cursor: help; }

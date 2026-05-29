@@ -1,5 +1,8 @@
 package ru.kalinin.context.model;
 
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -30,6 +33,11 @@ import java.util.Set;
  *
  * <p>Используйте фабрику {@link #of} вместо прямого создания.
  */
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind")
+@JsonSubTypes({
+        @JsonSubTypes.Type(value = UnchangedClassContext.class, name = "unchanged"),
+        @JsonSubTypes.Type(value = ModifiedClassContext.class, name = "modified")
+})
 public sealed interface ClassContext
         permits UnchangedClassContext, ModifiedClassContext {
 

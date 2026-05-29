@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Context debug</title>
+  <style>__CONTEXT_CSS__</style>
+</head>
+<body>
+  <header class="page-header">
+    <h1>Context debug</h1>
+    <p class="meta" id="page-meta"></p>
+    <p class="legend">Подсветка <mark class="ctx-type">жёлтым</mark> — все типы из контекста
+      (<span id="type-count">0</span> шт., включая nested). Наведите — qualified name.</p>
+  </header>
+  <div class="page-toolbar">
+    <label><input type="checkbox" id="pin-index" checked> Закрепить оглавление</label>
+  </div>
+  <div class="layout-body pinned" id="layout-body">
+    <nav class="ctx-index" id="ctx-index"></nav>
+    <main class="ctx-sections" id="ctx-sections"></main>
+  </div>
+  <script type="application/json" id="ctx-data">__CONTEXT_JSON__</script>
+  <script>__CONTEXT_JS__</script>
+</body>
+</html>

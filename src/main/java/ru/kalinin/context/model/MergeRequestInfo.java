@@ -1,5 +1,6 @@
 package ru.kalinin.context.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.gitlab4j.api.models.Diff;
 
 import java.util.List;
@@ -26,5 +27,5 @@ public record MergeRequestInfo(
         String authorUsername,
         List<CommitInfo> commits,
         List<String> changedFiles,
-        List<Diff> diffs
+        @JsonIgnore List<Diff> diffs
 ) {}
