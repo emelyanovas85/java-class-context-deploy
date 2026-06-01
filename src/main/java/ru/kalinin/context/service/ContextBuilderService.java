@@ -3,6 +3,8 @@ package ru.kalinin.context.service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import ru.kalinin.context.cache.ClassContextParseCache;
+import ru.kalinin.context.cache.ParseCacheEntry;
 import ru.kalinin.context.dependency.DependencyClassNameExtractor;
 import ru.kalinin.context.dependency.DependencyCoordinate;
 import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
@@ -56,6 +58,7 @@ public class ContextBuilderService {
     private final StructureNodeMapper nodeMapper;
     private final DependencyContextService dependencyContextService;
     private final DependencyClassNameExtractor classNameExtractor;
+    private final ClassContextParseCache parseCache;
     private final ExecutorService ioExecutor;
 
     public ContextBuilderService(GitLabService gitLabService,
@@ -63,12 +66,14 @@ public class ContextBuilderService {
                                  StructureNodeMapper nodeMapper,
                                  DependencyContextService dependencyContextService,
                                  DependencyClassNameExtractor classNameExtractor,
+                                 ClassContextParseCache parseCache,
                                  @Qualifier("ioExecutor") ExecutorService ioExecutor) {
         this.gitLabService = gitLabService;
         this.structureParser = structureParser;
         this.nodeMapper = nodeMapper;
         this.dependencyContextService = dependencyContextService;
         this.classNameExtractor = classNameExtractor;
+        this.parseCache = parseCache;
         this.ioExecutor = ioExecutor;
     }
 
@@ -173,8 +178,10 @@ public class ContextBuilderService {
                     List<StructureNode> tgtForClass = r.tgtNodes() != null
                             ? structureNodesForClass(r.tgtNodes(), r.parsed(), cs)
                             : null;
-                    allContexts.add(ClassContext.of(
-                            id, Set.of(), cs.qualifiedName(), 0, src0, srcForClass, tgtForClass));
+                    ClassContext ctx = ClassContext.of(
+                            id, Set.of(), cs.qualifiedName(), 0, src0, srcForClass, tgtForClass);
+                    allContexts.add(ctx);
+                    storeParseCache(src0, cs.qualifiedName(), r.parsed(), r.srcNodes(), ctx);
                 }
             }
         }
@@ -371,8 +378,10 @@ public class ContextBuilderService {
         } else {
             int id = idCounter.getAndIncrement();
             qNameToId.put(qn, id);
-            allContexts.add(ClassContext.of(
-                    id, r.callerIds(), qn, r.depth(), r.source(), srcNodes, tgtNodes));
+            ClassContext ctx = ClassContext.of(
+                    id, r.callerIds(), qn, r.depth(), r.source(), srcNodes, tgtNodes);
+            allContexts.add(ctx);
+            storeParseCache(r.source(), qn, r.parsed(), r.nodes(), ctx);
         }
 
         if (levelList.stream().noneMatch(c -> c.qualifiedName().equals(qn))) {
@@ -715,12 +724,7 @@ public class ContextBuilderService {
             totalResolved.incrementAndGet();
             String filePath = repoOpt.get().getKey();
             String content  = repoOpt.get().getValue();
-            return new DepthResult(
-                    qName, callerIds,
-                    structureParser.parse(content, filePath, depth, wildcardResolver),
-                    nodeMapper.map(content, filePath),
-                    repoSource(filePath),
-                    depth);
+            return buildDepthResult(qName, callerIds, repoSource(filePath), content, filePath, depth, wildcardResolver);
         }
 
         // 2. Поиск в jar — с подъёмом по outer классам
@@ -729,6 +733,14 @@ public class ContextBuilderService {
         while (!jarCandidate.isEmpty()) {
             Path jarPath = dependencySources.get(jarCandidate);
             if (jarPath != null) {
+                String module = jarSource(jarPath);
+                Optional<ParseCacheEntry> cached = parseCache.get(module, qName);
+                if (cached.isPresent() && cached.get().hasParsedStructures()) {
+                    totalResolved.incrementAndGet();
+                    log.debug("Parse cache hit (jar, memory): {} in {}", qName, module);
+                    return new DepthResult(
+                            qName, callerIds, cached.get().parsed(), cached.get().fileNodes(), module, depth);
+                }
                 Optional<String> contentOpt = classNameExtractor.extractSourceFile(jarPath, jarCandidate);
                 if (contentOpt.isPresent()) {
                     totalResolved.incrementAndGet();
@@ -736,16 +748,12 @@ public class ContextBuilderService {
                     String syntheticPath = jarCandidate.replace('.', '/') + ".java";
                     if (!jarCandidate.equals(qName)) {
                         log.debug("Type '{}' resolved via outer class '{}' from sources.jar ({})",
-                                qName, jarCandidate, jarSource(jarPath));
+                                qName, jarCandidate, module);
                     } else {
-                        log.debug("Resolved '{}' from sources.jar ({})", qName, jarSource(jarPath));
+                        log.debug("Resolved '{}' from sources.jar ({})", qName, module);
                     }
-                    return new DepthResult(
-                            qName, callerIds,
-                            structureParser.parse(content, syntheticPath, depth, wildcardResolver),
-                            nodeMapper.map(content, syntheticPath),
-                            jarSource(jarPath),
-                            depth);
+                    return buildDepthResult(
+                            qName, callerIds, module, content, syntheticPath, depth, wildcardResolver);
                 }
             }
             int lastDot = jarCandidate.lastIndexOf('.');
@@ -756,6 +764,45 @@ public class ContextBuilderService {
         totalSkipped.incrementAndGet();
         log.debug("Type '{}' not found in repo or dependency sources — skipping", qName);
         return null;
+    }
+
+    /**
+     * Парсит файл или восстанавливает результат из кэша (память / диск).
+     */
+    private DepthResult buildDepthResult(
+            String qName,
+            Set<Integer> callerIds,
+            String module,
+            String content,
+            String filePath,
+            int depth,
+            BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
+        Optional<ParseCacheEntry> cached = parseCache.get(module, qName);
+        if (cached.isPresent() && cached.get().hasParsedStructures()) {
+            log.debug("Parse cache hit: {} in {}", qName, module);
+            return new DepthResult(
+                    qName, callerIds, cached.get().parsed(), cached.get().fileNodes(), module, depth);
+        }
+
+        List<ClassStructure> parsed = structureParser.parse(content, filePath, depth, wildcardResolver);
+        List<StructureNode> nodes;
+        if (cached.isPresent()) {
+            nodes = cached.get().fileNodes();
+            log.debug("Parse cache partial hit (disk): {} in {} — structure parse only", qName, module);
+        } else {
+            nodes = nodeMapper.map(content, filePath);
+        }
+        return new DepthResult(qName, callerIds, parsed, nodes, module, depth);
+    }
+
+    private void storeParseCache(
+            String module,
+            String qualifiedName,
+            List<ClassStructure> parsed,
+            List<StructureNode> fileNodes,
+            ClassContext ctx) {
+        parseCache.put(module, qualifiedName,
+                new ParseCacheEntry(parsed, fileNodes, ParseCacheEntry.toTemplate(ctx)));
     }
 
     // ── awaitAll ────────────────────────────────────────────────────────────────────
