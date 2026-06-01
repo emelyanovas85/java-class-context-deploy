@@ -9,7 +9,9 @@ import ru.kalinin.context.dependency.DependencyClassNameExtractor;
 import ru.kalinin.context.dependency.DependencyCoordinate;
 import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 import ru.kalinin.context.model.*;
+import ru.kalinin.context.parser.JavaSourceParseService;
 import ru.kalinin.context.parser.JavaStructureParser;
+import ru.kalinin.context.parser.ParsedJavaFile;
 import ru.kalinin.context.parser.StructureNodeMapper;
 import ru.kalinin.context.parser.UnresolvedTypeRef;
 
@@ -29,8 +31,9 @@ import java.util.stream.Collectors;
  *   <li>Построение мёрженного файлового индекса.</li>
  *   <li>Сбор карты зависимостей: qualified name → путь к jar.</li>
  *   <li>Сборка wildcardResolver.</li>
- *   <li>Уровень 0: fetch + parse + map параллельно; merge однопоточно.</li>
- *   <li>Уровни 1..depth: волновой BFS — все типы волны fetch+parse+map параллельно;
+ *   <li>Уровень 0: fetch + один parse на ветку (source/target); merge однопоточно.</li>
+ *   <li>Уровни 1..depth: волновой BFS — типы волны параллельно; кэш до I/O;
+ *       один parse на файл ({@link ru.kalinin.context.parser.JavaSourceParseService});
  *       merge и формирование следующей волны — однопоточно.</li>
  *   <li>Финальный пасс: аналогично, параллельно
  *       по нерезолвленным типам.</li>
@@ -56,6 +59,7 @@ public class ContextBuilderService {
     private final GitLabService gitLabService;
     private final JavaStructureParser structureParser;
     private final StructureNodeMapper nodeMapper;
+    private final JavaSourceParseService sourceParseService;
     private final DependencyContextService dependencyContextService;
     private final DependencyClassNameExtractor classNameExtractor;
     private final ClassContextParseCache parseCache;
@@ -64,6 +68,7 @@ public class ContextBuilderService {
     public ContextBuilderService(GitLabService gitLabService,
                                  JavaStructureParser structureParser,
                                  StructureNodeMapper nodeMapper,
+                                 JavaSourceParseService sourceParseService,
                                  DependencyContextService dependencyContextService,
                                  DependencyClassNameExtractor classNameExtractor,
                                  ClassContextParseCache parseCache,
@@ -71,6 +76,7 @@ public class ContextBuilderService {
         this.gitLabService = gitLabService;
         this.structureParser = structureParser;
         this.nodeMapper = nodeMapper;
+        this.sourceParseService = sourceParseService;
         this.dependencyContextService = dependencyContextService;
         this.classNameExtractor = classNameExtractor;
         this.parseCache = parseCache;
@@ -145,16 +151,14 @@ public class ContextBuilderService {
                     Optional<String> tgt = gitLabService.readFileContent(
                             request.gitlabUrl(), request.token(),
                             request.projectId(), targetBranch, filePath);
-                    List<ClassStructure> parsed = src
-                            .map(s -> structureParser.parse(s, filePath, 0, wildcardResolver))
-                            .orElse(List.of());
-                    List<StructureNode> srcNodes = src
-                            .map(s -> nodeMapper.map(s, filePath))
-                            .orElse(List.of());
+                    ParsedJavaFile srcFile = src
+                            .map(s -> sourceParseService.parse(s, filePath, 0, wildcardResolver))
+                            .orElse(ParsedJavaFile.empty());
                     List<StructureNode> tgtNodes = tgt
-                            .map(s -> nodeMapper.map(s, filePath))
+                            .map(s -> sourceParseService.parse(s, filePath, 0, wildcardResolver).nodes())
                             .orElse(null);
-                    return new Level0Result(filePath, src, tgt, parsed, srcNodes, tgtNodes);
+                    return new Level0Result(
+                            filePath, src, tgt, srcFile.structures(), srcFile.nodes(), tgtNodes);
                 }, ioExecutor))
                 .toList();
 
@@ -715,36 +719,20 @@ public class ContextBuilderService {
 
         totalRequested.incrementAndGet();
 
-        // 1. Поиск в repo (с подъёмом по outer классам — уже внутри findRepoSourceForType)
-        Optional<Map.Entry<String, String>> repoOpt =
-                findRepoSourceForType(qName, fileIndex,
-                        request.gitlabUrl(), request.token(),
-                        request.projectId(), sourceBranch);
-        if (repoOpt.isPresent()) {
-            totalResolved.incrementAndGet();
-            String filePath = repoOpt.get().getKey();
-            String content  = repoOpt.get().getValue();
-            return buildDepthResult(qName, callerIds, repoSource(filePath), content, filePath, depth, wildcardResolver);
-        }
-
-        // 2. Поиск в jar — с подъёмом по outer классам
-        //    Например: userInterface.ComplexTable.Row → userInterface.ComplexTable
+        // 1. Jar — кэш до чтения sources.jar
         String jarCandidate = qName;
         while (!jarCandidate.isEmpty()) {
             Path jarPath = dependencySources.get(jarCandidate);
             if (jarPath != null) {
                 String module = jarSource(jarPath);
-                Optional<ParseCacheEntry> cached = parseCache.get(module, qName);
-                if (cached.isPresent() && cached.get().hasParsedStructures()) {
+                Optional<DepthResult> cached = depthResultFromCache(module, qName, callerIds, depth);
+                if (cached.isPresent()) {
                     totalResolved.incrementAndGet();
-                    log.debug("Parse cache hit (jar, memory): {} in {}", qName, module);
-                    return new DepthResult(
-                            qName, callerIds, cached.get().parsed(), cached.get().fileNodes(), module, depth);
+                    return cached.get();
                 }
                 Optional<String> contentOpt = classNameExtractor.extractSourceFile(jarPath, jarCandidate);
                 if (contentOpt.isPresent()) {
                     totalResolved.incrementAndGet();
-                    String content       = contentOpt.get();
                     String syntheticPath = jarCandidate.replace('.', '/') + ".java";
                     if (!jarCandidate.equals(qName)) {
                         log.debug("Type '{}' resolved via outer class '{}' from sources.jar ({})",
@@ -753,7 +741,7 @@ public class ContextBuilderService {
                         log.debug("Resolved '{}' from sources.jar ({})", qName, module);
                     }
                     return buildDepthResult(
-                            qName, callerIds, module, content, syntheticPath, depth, wildcardResolver);
+                            qName, callerIds, module, contentOpt.get(), syntheticPath, depth, wildcardResolver);
                 }
             }
             int lastDot = jarCandidate.lastIndexOf('.');
@@ -761,13 +749,79 @@ public class ContextBuilderService {
             jarCandidate = jarCandidate.substring(0, lastDot);
         }
 
+        // 2. Repo — кэш до HTTP, если путь известен из индекса
+        Optional<DepthResult> repoResult = fetchFromRepo(
+                qName, callerIds, depth, fileIndex, wildcardResolver,
+                request.gitlabUrl(), request.token(), request.projectId(), sourceBranch);
+        if (repoResult.isPresent()) {
+            totalResolved.incrementAndGet();
+            return repoResult.get();
+        }
+
         totalSkipped.incrementAndGet();
         log.debug("Type '{}' not found in repo or dependency sources — skipping", qName);
         return null;
     }
 
+    private Optional<DepthResult> depthResultFromCache(
+            String module, String qName, Set<Integer> callerIds, int depth) {
+        return parseCache.get(module, qName)
+                .filter(ParseCacheEntry::hasParsedStructures)
+                .map(e -> {
+                    log.debug("Parse cache hit (before I/O): {} in {}", qName, module);
+                    return new DepthResult(qName, callerIds, e.parsed(), e.fileNodes(), module, depth);
+                });
+    }
+
+    private Optional<DepthResult> fetchFromRepo(
+            String qName,
+            Set<Integer> callerIds,
+            int depth,
+            Map<String, List<String>> fileIndex,
+            BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+            String gitlabUrl,
+            String token,
+            String projectId,
+            String branch) {
+
+        Optional<String> repoPath = resolveRepoFilePath(qName, fileIndex);
+        if (repoPath.isPresent()) {
+            String module = repoSource(repoPath.get());
+            Optional<DepthResult> cached = depthResultFromCache(module, qName, callerIds, depth);
+            if (cached.isPresent()) {
+                return cached;
+            }
+            return gitLabService.readFileContent(gitlabUrl, token, projectId, branch, repoPath.get())
+                    .map(content -> buildDepthResult(
+                            qName, callerIds, module, content, repoPath.get(), depth, wildcardResolver));
+        }
+
+        return findTopLevelTypeInPackage(qName, callerIds, depth, fileIndex, wildcardResolver,
+                gitlabUrl, token, projectId, branch);
+    }
+
     /**
-     * Парсит файл или восстанавливает результат из кэша (память / диск).
+     * Путь к .java в репозитории (без чтения содержимого), с подъёмом по outer-классам.
+     */
+    private Optional<String> resolveRepoFilePath(String qName, Map<String, List<String>> fileIndex) {
+        Optional<String> path = gitLabService.findJavaFileByQualifiedName(fileIndex, qName);
+        if (path.isPresent()) {
+            return path;
+        }
+        String candidate = qName;
+        while (candidate.contains(".")) {
+            candidate = candidate.substring(0, candidate.lastIndexOf('.'));
+            path = gitLabService.findJavaFileByQualifiedName(fileIndex, candidate);
+            if (path.isPresent()) {
+                log.debug("Type '{}' resolved via outer class path '{}'", qName, candidate);
+                return path;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Парсит файл одним проходом или восстанавливает полный результат из кэша.
      */
     private DepthResult buildDepthResult(
             String qName,
@@ -777,30 +831,25 @@ public class ContextBuilderService {
             String filePath,
             int depth,
             BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
-        Optional<ParseCacheEntry> cached = parseCache.get(module, qName);
-        if (cached.isPresent() && cached.get().hasParsedStructures()) {
-            log.debug("Parse cache hit: {} in {}", qName, module);
-            return new DepthResult(
-                    qName, callerIds, cached.get().parsed(), cached.get().fileNodes(), module, depth);
+        Optional<DepthResult> cached = depthResultFromCache(module, qName, callerIds, depth);
+        if (cached.isPresent()) {
+            return cached.get();
         }
 
-        List<ClassStructure> parsed = structureParser.parse(content, filePath, depth, wildcardResolver);
-        List<StructureNode> nodes;
-        if (cached.isPresent()) {
-            nodes = cached.get().fileNodes();
-            log.debug("Parse cache partial hit (disk): {} in {} — structure parse only", qName, module);
-        } else {
-            nodes = nodeMapper.map(content, filePath);
-        }
-        return new DepthResult(qName, callerIds, parsed, nodes, module, depth);
+        ParsedJavaFile file = sourceParseService.parse(content, filePath, depth, wildcardResolver);
+        return new DepthResult(qName, callerIds, file.structures(), file.nodes(), module, depth);
     }
 
+    /** Кэш только для jar ({@code groupId:artifactId:version}), не для {@code src/main} / {@code src/test}. */
     private void storeParseCache(
             String module,
             String qualifiedName,
             List<ClassStructure> parsed,
             List<StructureNode> fileNodes,
             ClassContext ctx) {
+        if (!ClassContextParseCache.isCacheableModule(module)) {
+            return;
+        }
         parseCache.put(module, qualifiedName,
                 new ParseCacheEntry(parsed, fileNodes, ParseCacheEntry.toTemplate(ctx)));
     }
@@ -837,61 +886,38 @@ public class ContextBuilderService {
 
     // ── Repo source lookup ──────────────────────────────────────────────────────────
 
-    private Optional<Map.Entry<String, String>> findRepoSourceForType(
-            String qName,
-            Map<String, List<String>> fileIndex,
-            String gitlabUrl, String token, String projectId, String branch) {
-
-        Optional<Map.Entry<String, String>> exact =
-                readRepoFile(qName, fileIndex, gitlabUrl, token, projectId, branch);
-        if (exact.isPresent()) return exact;
-
-        String candidate = qName;
-        while (candidate.contains(".")) {
-            candidate = candidate.substring(0, candidate.lastIndexOf('.'));
-            Optional<Map.Entry<String, String>> found =
-                    readRepoFile(candidate, fileIndex, gitlabUrl, token, projectId, branch);
-            if (found.isPresent()) {
-                log.debug("Type '{}' resolved via outer class '{}'", qName, candidate);
-                return found;
-            }
-        }
-        return Optional.empty();
-    }
-
-    private Optional<Map.Entry<String, String>> readRepoFile(
-            String qName,
-            Map<String, List<String>> fileIndex,
-            String gitlabUrl, String token, String projectId, String branch) {
-        Optional<String> filePath = gitLabService.findJavaFileByQualifiedName(fileIndex, qName);
-        if (filePath.isPresent()) {
-            return gitLabService.readFileContent(
-                            gitlabUrl, token, projectId, branch, filePath.get())
-                    .map(content -> Map.entry(filePath.get(), content));
-        }
-        return findTopLevelTypeInPackage(qName, fileIndex, gitlabUrl, token, projectId, branch);
-    }
-
     /**
      * Ищет top-level тип по qualified name среди всех .java файлов его пакета.
-     * Нужен для package-private классов в том же файле, что и public (например {@code B} в {@code A.java}).
+     * Сначала проверяет кэш по пути файла (без HTTP).
      */
-    private Optional<Map.Entry<String, String>> findTopLevelTypeInPackage(
+    private Optional<DepthResult> findTopLevelTypeInPackage(
             String qName,
+            Set<Integer> callerIds,
+            int depth,
             Map<String, List<String>> fileIndex,
-            String gitlabUrl, String token, String projectId, String branch) {
+            BiFunction<String, List<String>, Optional<String>> wildcardResolver,
+            String gitlabUrl,
+            String token,
+            String projectId,
+            String branch) {
         int lastDot = qName.lastIndexOf('.');
         if (lastDot < 0) return Optional.empty();
         String packageName = qName.substring(0, lastDot);
         String simpleName = qName.substring(lastDot + 1);
 
         for (String candidatePath : gitLabService.listJavaFilesInPackage(fileIndex, packageName)) {
+            String module = repoSource(candidatePath);
+            Optional<DepthResult> cached = depthResultFromCache(module, qName, callerIds, depth);
+            if (cached.isPresent()) {
+                return cached;
+            }
             Optional<String> content = gitLabService.readFileContent(
                     gitlabUrl, token, projectId, branch, candidatePath);
             if (content.isPresent()
                     && structureParser.containsTopLevelType(content.get(), simpleName)) {
                 log.debug("Type '{}' resolved via package scan in {}", qName, candidatePath);
-                return Optional.of(Map.entry(candidatePath, content.get()));
+                return Optional.of(buildDepthResult(
+                        qName, callerIds, module, content.get(), candidatePath, depth, wildcardResolver));
             }
         }
         return Optional.empty();

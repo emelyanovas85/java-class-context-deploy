@@ -74,6 +74,6 @@ class ContextBuilderMergeResultsTest {
     }
 
     private static ContextBuilderService newService() {
-        return new ContextBuilderService(null, null, null, null, null, null, null);
+        return new ContextBuilderService(null, null, null, null, null, null, null, null);
     }
 }

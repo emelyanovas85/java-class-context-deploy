@@ -30,7 +30,7 @@ class ClassContextParseCacheTest {
     }
 
     @Test
-    void roundTripsClassContextOnDiskAndReloadsToMemory() throws Exception {
+    void roundTripsFullEntryOnDiskAndReloadsToMemory() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         Cache<String, ParseCacheEntry> memory = Caffeine.newBuilder().build();
         ClassContextParseCache cache = new ClassContextParseCache(
@@ -55,20 +55,38 @@ class ClassContextParseCacheTest {
 
         Path diskFile = tempDir.resolve("org.example__lib__1.0__cache.json");
         assertThat(diskFile).exists();
-        assertThat(Files.readString(diskFile)).contains("com.example.Foo");
+        assertThat(Files.readString(diskFile)).contains("com.example.Foo").contains("parsed");
 
         memory.invalidateAll();
         var reloaded = cache.get("org.example:lib:1.0", "com.example.Foo");
         assertThat(reloaded).isPresent();
         assertThat(reloaded.get().template().name()).isEqualTo("com.example.Foo");
-        assertThat(reloaded.get().hasParsedStructures()).isFalse();
+        assertThat(reloaded.get().hasParsedStructures()).isTrue();
+        assertThat(reloaded.get().parsed()).hasSize(1);
+        assertThat(reloaded.get().fileNodes()).hasSize(1);
+    }
 
-        memory.put(ClassContextParseCache.cacheKey("org.example:lib:1.0", "com.example.Foo"),
-                new ParseCacheEntry(parsed, nodes, template));
-        var fromMem = cache.get("org.example:lib:1.0", "com.example.Foo");
-        assertThat(fromMem).isPresent();
-        assertThat(fromMem.get().hasParsedStructures()).isTrue();
-        assertThat(fromMem.get().parsed()).hasSize(1);
+    @Test
+    void doesNotCacheRepoModules() {
+        ObjectMapper mapper = new ObjectMapper();
+        Cache<String, ParseCacheEntry> memory = Caffeine.newBuilder().build();
+        ClassContextParseCache cache = new ClassContextParseCache(
+                mapper, memory, true, tempDir.toString());
+
+        List<StructureNode> nodes = List.of(new StructureNode("class", "public class Foo", "1", null));
+        UnchangedClassContext template = new UnchangedClassContext(
+                0, "com.example.Foo", 0, Set.of(), "src/main", nodes);
+        List<ClassStructure> parsed = List.of(new ClassStructure(
+                List.of(), List.of("public"), "class", "Foo", "com.example.Foo",
+                List.of(), null, List.of(), List.of(), List.of(), List.of(),
+                "Foo.java", 1, List.of()));
+
+        cache.put("src/main", "com.example.Foo", new ParseCacheEntry(parsed, nodes, template));
+
+        assertThat(cache.get("src/main", "com.example.Foo")).isEmpty();
+        assertThat(ClassContextParseCache.isCacheableModule("src/main")).isFalse();
+        assertThat(ClassContextParseCache.isCacheableModule("src/test")).isFalse();
+        assertThat(ClassContextParseCache.isCacheableModule("org.example:lib:1.0")).isTrue();
     }
 
     @Test

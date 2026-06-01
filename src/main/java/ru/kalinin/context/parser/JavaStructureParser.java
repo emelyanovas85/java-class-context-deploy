@@ -77,8 +77,17 @@ public class JavaStructureParser {
             log.warn("Failed to parse {}: {}", sourceFile, result.getProblems());
             return List.of();
         }
+        return parseCompilationUnit(result.getResult().get(), sourceFile, contextLevel, wildcardResolver);
+    }
 
-        CompilationUnit cu = result.getResult().get();
+    /**
+     * Строит {@link ClassStructure} из уже разобранного {@link CompilationUnit}.
+     */
+    public List<ClassStructure> parseCompilationUnit(
+            CompilationUnit cu,
+            String sourceFile,
+            int contextLevel,
+            BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
         String packageName = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");

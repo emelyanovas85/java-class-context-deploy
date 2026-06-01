@@ -48,7 +48,13 @@ public class StructureNodeMapper {
             log.warn("Failed to build StructureNode for {}: {}", sourceFile, result.getProblems());
             return List.of();
         }
-        CompilationUnit cu = result.getResult().get();
+        return mapCompilationUnit(result.getResult().get());
+    }
+
+    /**
+     * Строит {@link StructureNode} из уже разобранного {@link CompilationUnit}.
+     */
+    public List<StructureNode> mapCompilationUnit(CompilationUnit cu) {
         List<StructureNode> nodes = new ArrayList<>();
         for (TypeDeclaration<?> type : cu.getTypes()) {
             nodes.add(mapType(type));

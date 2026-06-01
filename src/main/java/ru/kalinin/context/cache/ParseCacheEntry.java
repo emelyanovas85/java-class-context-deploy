@@ -11,8 +11,7 @@ import java.util.List;
 /**
  * Запись кэша парсинга: структуры для BFS и шаблон {@link ClassContext} для ответа.
  *
- * @param parsed   результат {@link ru.kalinin.context.parser.JavaStructureParser};
- *                 {@code null} после загрузки только с диска (нужен повторный parse)
+ * @param parsed   результат {@link ru.kalinin.context.parser.JavaStructureParser}
  * @param fileNodes узлы файла для {@link ru.kalinin.context.parser.StructureNodeMapper}
  * @param template  {@link ClassContext} без привязки к MR ({@code id=0}, пустые {@code callerIds})
  */
@@ -38,19 +37,4 @@ public record ParseCacheEntry(
         };
     }
 
-    public static List<StructureNode> fileNodesFromTemplate(ClassContext template) {
-        return switch (template) {
-            case UnchangedClassContext u -> u.structure();
-            case ModifiedClassContext m -> {
-                if (m.structureTarget() != null) {
-                    yield m.structureTarget();
-                }
-                yield m.structureSource() != null ? m.structureSource() : List.of();
-            }
-        };
-    }
-
-    public static ParseCacheEntry fromDiskTemplate(ClassContext template) {
-        return new ParseCacheEntry(null, fileNodesFromTemplate(template), template);
-    }
 }
