@@ -22,6 +22,7 @@ h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
 .layout-body.pinned .ctx-block:first-child { margin-top: 0; }
 .ctx-block h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: #0969da; }
 .ctx-block .section-idx { color: #57606a; font-weight: normal; margin-right: 0.35rem; }
-.ctx-meta { color: #57606a; font-size: 0.75em; font-weight: normal; }
+.ctx-meta { color: #57606a; font-size: 0.85em; font-weight: normal; }
+.ctx-index .ctx-meta { font-size: 0.75em; }
 pre.ctx { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
 mark.ctx-type { background: #fff8c5; border-bottom: 1px solid #d4a72c; border-radius: 2px; padding: 0 1px; cursor: help; }
