@@ -4,37 +4,22 @@
   const ROWS_WIDTH = 10;
   const INDENT_SIZE = 4;
   const KEY_PIN = 'ctx-index-pinned';
-  const CONTEXT_API = '/api/context';
   const LOAD_ERROR_MESSAGE = 'Страница не может быть загружена.';
 
   bootstrap();
 
   async function bootstrap() {
-    const requestEl = document.getElementById('ctx-request');
-    if (!requestEl) {
-      failLoad();
+    const dataEl = document.getElementById('ctx-data');
+    if (!dataEl || !dataEl.textContent.trim()) {
+      failLoad(new Error('ctx-data is empty'));
       return;
     }
 
-    let request;
-    try {
-      request = JSON.parse(requestEl.textContent);
-    } catch (e) {
-      failLoad(e);
-      return;
-    }
+    await new Promise(resolve => requestAnimationFrame(resolve));
 
     let data;
     try {
-      const response = await fetch(CONTEXT_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
-      });
-      if (!response.ok) {
-        throw new Error('HTTP ' + response.status);
-      }
-      data = await response.json();
+      data = JSON.parse(dataEl.textContent);
     } catch (e) {
       failLoad(e);
       return;
