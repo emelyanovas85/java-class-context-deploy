@@ -5,7 +5,12 @@
   <title>Context debug</title>
   <style>__CONTEXT_CSS__</style>
 </head>
-<body>
+<body class="is-loading">
+  <div id="ctx-loading" class="ctx-loading" role="status" aria-live="polite">
+    <div class="ctx-spinner" aria-hidden="true"></div>
+    <p class="ctx-loading-text">Загрузка контекста…</p>
+  </div>
+  <div id="ctx-app" class="ctx-app">
   <header class="page-header">
     <h1>Context debug</h1>
     <p class="meta" id="page-meta"></p>
@@ -20,7 +25,8 @@
     <nav class="ctx-index" id="ctx-index"></nav>
     <main class="ctx-sections" id="ctx-sections"></main>
   </div>
-  <script type="application/json" id="ctx-data">__CONTEXT_JSON__</script>
+  </div>
+  <script type="application/json" id="ctx-request">__CONTEXT_REQUEST__</script>
   <script>__CONTEXT_JS__</script>
 </body>
 </html>

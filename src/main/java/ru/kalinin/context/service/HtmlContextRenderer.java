@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
-import ru.kalinin.context.model.ContextResponse;
+import ru.kalinin.context.model.ContextRequest;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets;
 @Component
 public class HtmlContextRenderer {
 
-    private static final String JSON_PLACEHOLDER = "__CONTEXT_JSON__";
+    private static final String REQUEST_PLACEHOLDER = "__CONTEXT_REQUEST__";
     private static final String CSS_PLACEHOLDER = "__CONTEXT_CSS__";
     private static final String JS_PLACEHOLDER = "__CONTEXT_JS__";
 
@@ -34,14 +34,17 @@ public class HtmlContextRenderer {
                 .replace(JS_PLACEHOLDER, loadResource(JS_PATH));
     }
 
-    public String render(ContextResponse response) {
+    /**
+     * HTML-оболочка: данные контекста подгружаются на клиенте через POST /api/context.
+     */
+    public String renderShell(ContextRequest request) {
         String json;
         try {
-            json = objectMapper.writeValueAsString(response);
+            json = objectMapper.writeValueAsString(request);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize context for debug page", e);
+            throw new IllegalStateException("Failed to serialize context request for debug page", e);
         }
-        return pageShell.replace(JSON_PLACEHOLDER, json);
+        return pageShell.replace(REQUEST_PLACEHOLDER, json);
     }
 
     private static String loadResource(String path) {

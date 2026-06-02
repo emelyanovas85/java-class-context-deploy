@@ -76,8 +76,8 @@ public class ContextController {
     @Operation(
             summary = "Построить контекст (HTML для отладки)",
             description = """
-                    Те же параметры, что у POST /api/context. Возвращает HTML-шаблон
-                    с JSON (ContextResponse) и клиентским рендером (/context-debug.js).
+                    Те же параметры, что у POST /api/context. Сразу возвращает HTML-оболочку
+                    со спиннером; данные подгружаются на клиенте через POST /api/context.
                     """
     )
     @ApiResponses({
@@ -93,9 +93,10 @@ public class ContextController {
                 request.mergeRequestIid(), request.projectId(), request.depth());
         Instant start = Instant.now();
         ContextResponse response = contextBuilderService.buildContext(request);
-        String html = htmlContextRenderer.render(response);
-        log.info("HTML context built: {} classes   {} ms",
-                response.totalClassesAnalyzed(), Duration.between(start, Instant.now()).toMillis());
+        String html = htmlContextRenderer.renderShell(request);
+        log.info("HTML context shell sent for MR !{} ({} classes)   {} ms",
+                request.mergeRequestIid(), response.totalClassesAnalyzed(),
+                Duration.between(start, Instant.now()).toMillis());
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_HTML)
                 .body(html);

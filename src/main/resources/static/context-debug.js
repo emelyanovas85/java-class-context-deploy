@@ -4,25 +4,82 @@
   const ROWS_WIDTH = 10;
   const INDENT_SIZE = 4;
   const KEY_PIN = 'ctx-index-pinned';
+  const CONTEXT_API = '/api/context';
+  const LOAD_ERROR_MESSAGE = 'Страница не может быть загружена.';
 
-  const dataEl = document.getElementById('ctx-data');
-  if (!dataEl) return;
+  bootstrap();
 
-  const DATA = JSON.parse(dataEl.textContent);
-  const files = DATA.files || [];
-  const classes = flattenClasses(files);
+  async function bootstrap() {
+    const requestEl = document.getElementById('ctx-request');
+    if (!requestEl) {
+      failLoad();
+      return;
+    }
 
-  const allQualifiedNames = collectAllQualifiedNames(classes);
-  const contextIdByName = buildContextIdByName(classes);
-  const nestedToRootTop = buildNestedToRootTopLevel(classes);
-  const highlightPatterns = buildHighlightPatterns(
-      allQualifiedNames, contextIdByName, nestedToRootTop);
+    let request;
+    try {
+      request = JSON.parse(requestEl.textContent);
+    } catch (e) {
+      failLoad(e);
+      return;
+    }
 
-  document.getElementById('type-count').textContent = String(allQualifiedNames.size);
-  renderMeta(DATA);
-  renderIndex(files);
-  renderSections(files, highlightPatterns);
-  initPinLayout();
+    let data;
+    try {
+      const response = await fetch(CONTEXT_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+      data = await response.json();
+    } catch (e) {
+      failLoad(e);
+      return;
+    }
+
+    try {
+      renderApp(data);
+      finishLoad();
+    } catch (e) {
+      failLoad(e);
+    }
+  }
+
+  function finishLoad() {
+    document.body.classList.remove('is-loading');
+  }
+
+  function failLoad(err) {
+    if (err) console.error('Context debug page load failed', err);
+    document.body.classList.add('is-error');
+    const loadingText = document.querySelector('.ctx-loading-text');
+    if (loadingText) {
+      loadingText.textContent = LOAD_ERROR_MESSAGE;
+    }
+    const spinner = document.querySelector('.ctx-spinner');
+    if (spinner) spinner.style.display = 'none';
+    window.alert(LOAD_ERROR_MESSAGE);
+  }
+
+  function renderApp(data) {
+    const files = data.files || [];
+    const classes = flattenClasses(files);
+
+    const allQualifiedNames = collectAllQualifiedNames(classes);
+    const contextIdByName = buildContextIdByName(classes);
+    const nestedToRootTop = buildNestedToRootTopLevel(classes);
+    const highlightPatterns = buildHighlightPatterns(
+        allQualifiedNames, contextIdByName, nestedToRootTop);
+
+    document.getElementById('type-count').textContent = String(allQualifiedNames.size);
+    renderMeta(data);
+    renderIndex(files);
+    renderSections(files, highlightPatterns);
+    initPinLayout();
+  }
 
   function initPinLayout() {
     const cb = document.getElementById('pin-index');
@@ -353,11 +410,32 @@
     return text.startsWith('&lt;', end) || text.startsWith('&gt;', end);
   }
 
+  /** Строки заголовков в &lt;pre&gt; — без подсветки типов. */
+  function isHighlightSkippedLine(line) {
+    return line.startsWith('### ') || line.startsWith('#### ');
+  }
+
   /**
    * Подсветка по «сырому» тексту (Foo&lt;Bar&gt; в сигнатуре), затем безопасный HTML.
    * Не использовать highlight после escapeHtml — границы generics ломаются.
    */
   function highlightToSafeHtml(text, patterns) {
+    if (!text) return '';
+    if (!patterns.length) return escapeHtml(text);
+
+    const lines = text.split('\n');
+    let out = '';
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) out += '\n';
+      const line = lines[i];
+      out += isHighlightSkippedLine(line)
+          ? escapeHtml(line)
+          : highlightLineToSafeHtml(line, patterns);
+    }
+    return out;
+  }
+
+  function highlightLineToSafeHtml(text, patterns) {
     if (!text) return '';
     if (!patterns.length) return escapeHtml(text);
 
