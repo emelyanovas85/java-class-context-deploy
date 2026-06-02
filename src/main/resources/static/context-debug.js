@@ -59,6 +59,12 @@
     return out;
   }
 
+  const JAVA_SOURCE_PREFIXES = [
+    'src/main/java/',
+    'src/test/java/',
+    'src/main/kotlin/',
+  ];
+
   function renderIndex(files) {
     const nav = document.getElementById('ctx-index');
     if (!files.length) {
@@ -68,11 +74,7 @@
     let html = '<h2>Оглавление (' + files.length + ')</h2><ol>';
     files.forEach((file, i) => {
       const sid = sectionId(i + 1);
-      const names = (file.classes || []).map(c => c.name).join(', ');
-      html += '<li><a href="#' + sid + '">' + escapeHtml(file.path || '') + '</a>';
-      html += ' <span class="ctx-meta">[level=' + file.level + ', module=' + escapeHtml(file.module || '') + ']</span>';
-      if (names) html += '<br><span class="ctx-meta">' + escapeHtml(names) + '</span>';
-      html += '</li>';
+      html += '<li>' + renderFileHeadingHtml(file, sid) + renderFileClassListHtml(file) + '</li>';
     });
     html += '</ol>';
     nav.innerHTML = html;
@@ -87,19 +89,56 @@
       const body = highlightToSafeHtml(formatFileBody(file), patterns);
       html += '<section class="ctx-block" id="' + sid + '"><h2>';
       html += '<span class="section-idx">#' + index + '</span>';
-      html += '<a href="#' + sid + '">' + escapeHtml(file.path || '') + '</a>';
-      html += ' <span class="ctx-meta">[level=' + file.level + ', module=' + escapeHtml(file.module || '') + ']</span>';
-      html += '</h2><pre class="ctx">' + body + '</pre></section>';
+      html += renderFileHeadingHtml(file, sid);
+      html += '</h2>';
+      html += renderFileClassListHtml(file);
+      html += '<pre class="ctx">' + body + '</pre></section>';
     });
     main.innerHTML = html;
   }
 
-  function formatFileBody(file) {
-    const sorted = [...(file.classes || [])].sort((a, b) => {
+  /** Путь относительно {@code src/.../java/} (как в IDE), иначе как есть (jar). */
+  function displayFilePath(path) {
+    if (!path) return '';
+    for (const prefix of JAVA_SOURCE_PREFIXES) {
+      const idx = path.indexOf(prefix);
+      if (idx >= 0) return path.substring(idx + prefix.length);
+    }
+    return path;
+  }
+
+  function renderFileHeadingHtml(file, sectionId) {
+    const label = displayFilePath(file.path || '');
+    let html = '<a href="#' + sectionId + '">' + escapeHtml(label) + '</a>';
+    html += ' <span class="ctx-meta">[module=' + escapeHtml(file.module || '') + ']</span>';
+    return html;
+  }
+
+  function renderFileClassListHtml(file) {
+    const sorted = sortedFileClasses(file);
+    if (!sorted.length) return '';
+    let html = '<ul class="ctx-class-list">';
+    for (const ctx of sorted) {
+      html += '<li>' + escapeHtml(formatClassBullet(ctx)) + '</li>';
+    }
+    html += '</ul>';
+    return html;
+  }
+
+  function sortedFileClasses(file) {
+    return [...(file.classes || [])].sort((a, b) => {
       if (a.level !== b.level) return a.level - b.level;
       return a.id - b.id;
     });
-    return sorted.map(ctx => formatClassSection(ctx)).join('\n\n');
+  }
+
+  function formatClassBullet(ctx) {
+    const callers = ctx.callerIds ? [...ctx.callerIds].sort((a, b) => a - b).join(',') : '';
+    return simpleName(ctx.name) + ' [level=' + ctx.level + ', id=' + ctx.id + ', callers=[' + callers + ']]';
+  }
+
+  function formatFileBody(file) {
+    return sortedFileClasses(file).map(ctx => formatClassSection(ctx)).join('\n\n');
   }
 
   function formatClassSection(ctx) {
@@ -110,16 +149,6 @@
       return header + '  [unchanged]\n' + formatClassBody(ctx);
     }
     return header + '\n' + formatClassBody(ctx);
-  }
-
-  function classLinkHtml(sectionId, ctx) {
-    return '<a href="#' + sectionId + '">' + escapeHtml(ctx.name) + '</a>'
-        + ' <span class="ctx-meta">' + escapeHtml(formatCtxMeta(ctx)) + '</span>';
-  }
-
-  function formatCtxMeta(ctx) {
-    const callers = ctx.callerIds ? [...ctx.callerIds].join(', ') : '';
-    return '[level=' + ctx.level + ', id=' + ctx.id + ', callers=[' + callers + '], module=' + ctx.module + ']';
   }
 
   function formatClassBody(ctx) {
