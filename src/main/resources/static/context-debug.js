@@ -161,7 +161,7 @@
     if (!sorted.length) return '';
     let html = '<ul class="ctx-class-list">';
     for (const ctx of sorted) {
-      html += '<li>' + escapeHtml(formatClassBullet(ctx)) + '</li>';
+      html += '<li><sname>' + simpleName(ctx.name) + '</sname>' + escapeHtml(formatClassBulletInfo(ctx)) + '</li>';
     }
     html += '</ul>';
     return html;
@@ -174,9 +174,9 @@
     });
   }
 
-  function formatClassBullet(ctx) {
+  function formatClassBulletInfo(ctx) {
     const callers = ctx.callerIds ? [...ctx.callerIds].sort((a, b) => a - b).join(',') : '';
-    return simpleName(ctx.name) + ' [level=' + ctx.level + ', id=' + ctx.id + ', callers=[' + callers + ']]';
+    return ' [level=' + ctx.level + ', id=' + ctx.id + ', callers=[' + callers + ']]';
   }
 
   function formatFileBody(file) {

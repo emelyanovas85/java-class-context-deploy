@@ -33,6 +33,7 @@ h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
 .ctx-index li { margin: 0.35rem 0; margin-left: 10px; }
 .ctx-class-list { margin: 0.25rem 0 0; padding: 0 0 0 0.25rem; list-style: none; font-size: 0.85em; color: #57606a; }
 .ctx-class-list li::before { content: '- '; }
+sname { font-size: 1em; color: black; }
 .ctx-block .ctx-class-list { margin-bottom: 0.5rem; }
 .ctx-index a { color: #0969da; text-decoration: none; }
 .ctx-index a:hover { text-decoration: underline; }
