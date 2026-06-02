@@ -797,7 +797,7 @@ public class ContextBuilderService {
             if (cached.isPresent()) {
                 return cached;
             }
-            return gitLabService.readFileContent(gitlabUrl, token, projectId, branch, repoPath.get())
+            return readRepoContentCached(gitlabUrl, token, projectId, branch, repoPath.get())
                     .map(content -> buildDepthResult(
                             qName, callerIds, module, content, repoPath.get(), depth, wildcardResolver));
         }
@@ -842,8 +842,33 @@ public class ContextBuilderService {
             return cached.get();
         }
 
-        ParsedJavaFile file = sourceParseService.parse(content, filePath, depth, wildcardResolver);
+        ParsedJavaFile file = parseCache.getParsedFile(module, filePath)
+                .orElseGet(() -> {
+                    ParsedJavaFile parsed = sourceParseService.parse(
+                            content, filePath, depth, wildcardResolver);
+                    parseCache.storeParsedFile(module, filePath, parsed);
+                    return parsed;
+                });
+
+        parseCache.publishParsed(module, qName, file.structures(), file.nodes(), null);
+
         return new DepthResult(qName, callerIds, file.structures(), file.nodes(), module, depth);
+    }
+
+    private Optional<String> readRepoContentCached(
+            String gitlabUrl,
+            String token,
+            String projectId,
+            String branch,
+            String filePath) {
+        Optional<String> cached = parseCache.getRepoFileContent(gitlabUrl, projectId, branch, filePath);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        Optional<String> content = gitLabService.readFileContent(
+                gitlabUrl, token, projectId, branch, filePath);
+        content.ifPresent(c -> parseCache.storeRepoFileContent(gitlabUrl, projectId, branch, filePath, c));
+        return content;
     }
 
     /** Кэш только для jar ({@code groupId:artifactId:version}), не для {@code src/main} / {@code src/test}. */
@@ -917,7 +942,7 @@ public class ContextBuilderService {
             if (cached.isPresent()) {
                 return cached;
             }
-            Optional<String> content = gitLabService.readFileContent(
+            Optional<String> content = readRepoContentCached(
                     gitlabUrl, token, projectId, branch, candidatePath);
             if (content.isPresent()
                     && structureParser.containsTopLevelType(content.get(), simpleName)) {

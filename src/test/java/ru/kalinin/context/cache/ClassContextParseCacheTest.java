@@ -119,8 +119,10 @@ class ClassContextParseCacheTest {
 
         try (ParseCacheRequestScope scope = cache.beginScope()) {
             cache.put("src/main", "com.example.Foo", new ParseCacheEntry(parsed, nodes, template));
-            assertThat(cache.get("src/main", "com.example.Foo")).isEmpty();
+            assertThat(cache.get("src/main", "com.example.Foo")).isPresent();
+            assertThat(scope.pendingJarEntries).isEmpty();
         }
+        assertThat(tempDir.resolve("src__main__cache.json")).doesNotExist();
         assertThat(ClassContextParseCache.isCacheableModule("src/main")).isFalse();
         assertThat(ClassContextParseCache.isCacheableModule("src/test")).isFalse();
         assertThat(ClassContextParseCache.isCacheableModule("org.example:lib:1.0")).isTrue();

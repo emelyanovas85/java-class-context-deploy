@@ -6,12 +6,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import ru.kalinin.context.model.ClassContext;
+import ru.kalinin.context.parser.ParsedJavaFile;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -19,20 +22,8 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Двухуровневый кэш результатов парсинга: память (Caffeine, TTL) + диск ({@code {module}__cache.json}).
  *
- * <p>На диске и в памяти хранится полный {@link ParseCacheEntry}
- * ({@link ru.kalinin.context.model.ClassStructure}, {@link ru.kalinin.context.model.StructureNode},
- * шаблон {@link ru.kalinin.context.model.ClassContext}).
- *
- * <p>Кэшируются только типы из внешних jar ({@code groupId:artifactId:version}).
- * Исходники репозитория ({@code src/main}, {@code src/test}) не кэшируются.
- *
- * <h3>Оптимизации</h3>
- * <ul>
- *   <li>При первом обращении к модулю в рамках запроса — одно чтение {@code __cache.json}
- *       и прогрев Caffeine всеми записями файла.</li>
- *   <li>Содержимое файла модуля держится в {@link ParseCacheRequestScope} без synchronized при чтении.</li>
- *   <li>Запись на диск откладывается до {@link ParseCacheRequestScope#close()} (конец {@code buildContext}).</li>
- * </ul>
+ * <p>Кэшируются на диск только jar ({@code groupId:artifactId:version}).
+ * В память публикуются и repo-типы — для параллельного BFS без повторного GitLab/parse.
  */
 @Slf4j
 @Component
@@ -40,15 +31,14 @@ public class ClassContextParseCache {
 
     static final String CACHE_SUFFIX = "__cache.json";
     static final String KEY_SEPARATOR = "::";
+    static final String FILE_KEY_PREFIX = "::file::";
 
     private final boolean enabled;
     private final Path cacheDir;
     private final ObjectMapper objectMapper;
     private final Cache<String, ParseCacheEntry> memoryCache;
 
-    /** lock только для первичной загрузки файла модуля с диска (один раз на модуль за запрос) */
     private final ConcurrentHashMap<String, Object> moduleLoadLocks = new ConcurrentHashMap<>();
-
     private final AtomicReference<ParseCacheRequestScope> activeScope = new AtomicReference<>();
 
     public ClassContextParseCache(
@@ -74,66 +64,26 @@ public class ClassContextParseCache {
         return enabled;
     }
 
-    /**
-     * Открывает scope на время обработки одного MR-запроса (параллельные потоки BFS делят один scope).
-     */
     public ParseCacheRequestScope beginScope() {
         ParseCacheRequestScope scope = new ParseCacheRequestScope(this);
         activeScope.set(scope);
         return scope;
     }
 
-    /**
-     * Только jar-зависимости ({@code groupId:artifactId:version}), не {@code src/main} / {@code src/test}.
-     */
     public static boolean isCacheableModule(String module) {
         return module != null && module.indexOf(':') >= 0;
     }
 
-    /**
-     * @param module        {@code groupId:artifactId:version} для jar; repo-модули игнорируются
-     * @param qualifiedName полное имя типа
-     */
-    public Optional<ParseCacheEntry> get(String module, String qualifiedName) {
-        if (!enabled || !isCacheableModule(module)) {
-            return Optional.empty();
-        }
-        ensureModuleAvailable(module);
-
-        String key = cacheKey(module, qualifiedName);
-        ParseCacheEntry mem = memoryCache.getIfPresent(key);
-        if (mem != null && mem.hasParsedStructures()) {
-            log.debug("Parse cache memory hit: {}", key);
-            return Optional.of(mem);
-        }
-        return Optional.empty();
-    }
-
-    public void put(String module, String qualifiedName, ParseCacheEntry entry) {
-        if (!enabled || !isCacheableModule(module) || entry == null || !entry.hasParsedStructures()) {
-            return;
-        }
-        ParseCacheRequestScope scope = activeScope.get();
-        if (scope == null) {
-            putWithoutScope(module, qualifiedName, entry);
-            return;
-        }
-
-        String key = cacheKey(module, qualifiedName);
-        memoryCache.put(key, entry);
-
-        ParseCacheEntry diskEntry = entry.template() != null
-                ? new ParseCacheEntry(entry.parsed(), entry.fileNodes(), ParseCacheEntry.toTemplate(entry.template()))
-                : entry;
-
-        ensureModuleAvailable(module);
-        scope.moduleFiles.compute(module, (m, disk) -> mergeEntry(disk, qualifiedName, diskEntry));
-        scope.dirtyModules.add(module);
-        log.debug("Parse cache stored (deferred disk): {}", key);
-    }
-
-    static String cacheKey(String module, String qualifiedName) {
+    public static String cacheKey(String module, String qualifiedName) {
         return module + KEY_SEPARATOR + qualifiedName;
+    }
+
+    public static String fileParseKey(String module, String filePath) {
+        return module + FILE_KEY_PREFIX + filePath;
+    }
+
+    public static String repoContentKey(String gitlabUrl, String projectId, String branch, String filePath) {
+        return gitlabUrl + KEY_SEPARATOR + projectId + KEY_SEPARATOR + branch + KEY_SEPARATOR + filePath;
     }
 
     static String diskFileName(String module) {
@@ -144,22 +94,159 @@ public class ClassContextParseCache {
         return module.replace("/", "__").replace(":", "__");
     }
 
+    /**
+     * Чтение: сначала Caffeine (все модули), затем прогрев с диска для jar.
+     */
+    public Optional<ParseCacheEntry> get(String module, String qualifiedName) {
+        if (!enabled) {
+            return Optional.empty();
+        }
+        String key = cacheKey(module, qualifiedName);
+        ParseCacheEntry mem = memoryCache.getIfPresent(key);
+        if (mem != null && mem.hasParsedStructures()) {
+            log.debug("Parse cache memory hit: {}", key);
+            return Optional.of(mem);
+        }
+        if (!isCacheableModule(module)) {
+            return Optional.empty();
+        }
+        ensureModuleAvailable(module);
+        mem = memoryCache.getIfPresent(key);
+        if (mem != null && mem.hasParsedStructures()) {
+            log.debug("Parse cache memory hit: {}", key);
+            return Optional.of(mem);
+        }
+        return Optional.empty();
+    }
+
+    public void put(String module, String qualifiedName, ParseCacheEntry entry) {
+        if (!enabled || entry == null || !entry.hasParsedStructures()) {
+            return;
+        }
+        ClassContext template = entry.template();
+        publishParsed(
+                module,
+                qualifiedName,
+                entry.parsed(),
+                entry.fileNodes(),
+                template != null ? ParseCacheEntry.toTemplate(template) : null);
+    }
+
+    /**
+     * Публикует результат parse в Caffeine сразу (до flush).
+     * Для jar накапливает в {@link ParseCacheRequestScope#pendingJarEntries} с дедупликацией по ключу.
+     */
+    public void publishParsed(
+            String module,
+            String qualifiedName,
+            java.util.List<ru.kalinin.context.model.ClassStructure> parsed,
+            java.util.List<ru.kalinin.context.model.StructureNode> fileNodes,
+            ClassContext template) {
+        if (!enabled || parsed == null || parsed.isEmpty()) {
+            return;
+        }
+        String key = cacheKey(module, qualifiedName);
+
+        ParseCacheRequestScope scope = activeScope.get();
+        if (scope != null && isCacheableModule(module)) {
+            ensureModuleAvailable(module);
+            scope.pendingJarEntries.compute(key, (k, prev) -> {
+                ClassContext mergedTemplate = template != null
+                        ? template
+                        : prev != null ? prev.template() : null;
+                ParseCacheEntry next = new ParseCacheEntry(parsed, fileNodes, mergedTemplate);
+                memoryCache.put(k, next);
+                if (!Objects.equals(prev, next)) {
+                    scope.dirtyModules.add(module);
+                    log.debug("Parse cache stored (deferred disk): {}", k);
+                }
+                return next;
+            });
+            return;
+        }
+
+        ClassContext mergedTemplate = template;
+        if (scope != null) {
+            ParseCacheEntry prev = scope.pendingJarEntries.get(key);
+            if (mergedTemplate == null && prev != null) {
+                mergedTemplate = prev.template();
+            }
+        }
+        ParseCacheEntry newEntry = new ParseCacheEntry(parsed, fileNodes, mergedTemplate);
+        memoryCache.put(key, newEntry);
+
+        if (!isCacheableModule(module)) {
+            return;
+        }
+
+        if (scope == null) {
+            putWithoutScope(module, qualifiedName, newEntry);
+        }
+    }
+
+    /**
+     * Один parse на файл за запрос (параллельные потоки делят результат).
+     */
+    public Optional<ParsedJavaFile> getParsedFile(String module, String filePath) {
+        ParseCacheRequestScope scope = activeScope.get();
+        if (scope == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(scope.parsedByFile.get(fileParseKey(module, filePath)));
+    }
+
+    public void storeParsedFile(String module, String filePath, ParsedJavaFile file) {
+        ParseCacheRequestScope scope = activeScope.get();
+        if (scope == null || file == null) {
+            return;
+        }
+        scope.parsedByFile.put(fileParseKey(module, filePath), file);
+    }
+
+    /**
+     * Содержимое .java из GitLab — один HTTP на путь за запрос.
+     */
+    public Optional<String> getRepoFileContent(
+            String gitlabUrl, String projectId, String branch, String filePath) {
+        ParseCacheRequestScope scope = activeScope.get();
+        if (scope == null) {
+            return Optional.empty();
+        }
+        String content = scope.repoFileContent.get(repoContentKey(gitlabUrl, projectId, branch, filePath));
+        return content != null && !content.isEmpty() ? Optional.of(content) : Optional.empty();
+    }
+
+    public void storeRepoFileContent(
+            String gitlabUrl, String projectId, String branch, String filePath, String content) {
+        ParseCacheRequestScope scope = activeScope.get();
+        if (scope == null || content == null) {
+            return;
+        }
+        scope.repoFileContent.put(repoContentKey(gitlabUrl, projectId, branch, filePath), content);
+    }
+
     void flushScope(ParseCacheRequestScope scope) {
         if (!enabled || scope == null) {
             return;
         }
         int flushed = scope.dirtyModules.size();
         for (String module : scope.dirtyModules) {
-            ParseCacheDiskFile disk = scope.moduleFiles.get(module);
-            if (disk != null) {
-                writeModuleFile(module, disk);
+            ParseCacheDiskFile base = scope.moduleFiles.getOrDefault(module, ParseCacheDiskFile.empty());
+            ParseCacheDiskFile merged = base;
+            String prefix = module + KEY_SEPARATOR;
+            for (Map.Entry<String, ParseCacheEntry> e : scope.pendingJarEntries.entrySet()) {
+                if (!e.getKey().startsWith(prefix)) {
+                    continue;
+                }
+                String qName = e.getKey().substring(prefix.length());
+                merged = mergeEntry(merged, qName, e.getValue());
             }
+            writeModuleFile(module, merged);
+            scope.moduleFiles.put(module, merged);
         }
         activeScope.compareAndSet(scope, null);
         log.debug("Parse cache scope closed, flushed {} module(s)", flushed);
     }
-
-    // ── module load / warm ─────────────────────────────────────────────────────
 
     private void ensureModuleAvailable(String module) {
         ParseCacheRequestScope scope = activeScope.get();
@@ -240,15 +327,10 @@ public class ClassContextParseCache {
         }
     }
 
-    /** Fallback без request-scope (тесты): сразу пишет на диск. */
     private void putWithoutScope(String module, String qualifiedName, ParseCacheEntry entry) {
-        String key = cacheKey(module, qualifiedName);
-        memoryCache.put(key, entry);
-        ParseCacheEntry diskEntry = entry.template() != null
-                ? new ParseCacheEntry(entry.parsed(), entry.fileNodes(), ParseCacheEntry.toTemplate(entry.template()))
-                : entry;
+        memoryCache.put(cacheKey(module, qualifiedName), entry);
         ParseCacheDiskFile disk = readModuleFileFromDisk(module);
-        writeModuleFile(module, mergeEntry(disk, qualifiedName, diskEntry));
-        log.debug("Parse cache stored: {}", key);
+        writeModuleFile(module, mergeEntry(disk, qualifiedName, entry));
+        log.debug("Parse cache stored: {}", cacheKey(module, qualifiedName));
     }
 }
