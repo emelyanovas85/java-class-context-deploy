@@ -12,11 +12,15 @@
   </div>
   <div id="ctx-app" class="ctx-app">
   <header class="page-header">
-    <h1>Context debug</h1>
+    <h1 class="page-title">
+      Context debug
+      <span class="ctx-help" tabindex="0">
+        <span class="ctx-help-icon" aria-hidden="true">?</span>
+        <span class="ctx-help-tip" role="tooltip">Подсветка <mark class="ctx-type">жёлтым</mark> — все типы из контекста
+          (<span id="type-count">0</span> шт., включая nested) (для nested — id top-level класса).</span>
+      </span>
+    </h1>
     <p class="meta" id="page-meta"></p>
-    <p class="legend">Подсветка <mark class="ctx-type">жёлтым</mark> — все типы из контекста
-      (<span id="type-count">0</span> шт., включая nested). Наведите — qualified name и id контекста
-      (для nested — id top-level класса).</p>
   </header>
   <div class="page-toolbar">
     <label><input type="checkbox" id="pin-index" checked> Закрепить оглавление</label>

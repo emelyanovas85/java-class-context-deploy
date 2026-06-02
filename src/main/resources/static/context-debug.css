@@ -17,14 +17,35 @@ body:not(.is-loading) .ctx-loading { display: none; }
 }
 @keyframes ctx-spin { to { transform: rotate(360deg); } }
 .page-header { padding: 1.5rem 1.5rem 0; }
-h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+h1.page-title {
+  font-size: 1.25rem; margin: 0 0 0.5rem;
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.ctx-help { position: relative; display: inline-flex; outline: none; }
+.ctx-help-icon {
+  font-size: 0.65rem; width: 1rem; height: 1rem;
+  border-radius: 50%; border: 1px solid #8c959f;
+  color: #57606a; background: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: help; font-weight: 600; line-height: 1;
+}
+.ctx-help:hover .ctx-help-icon,
+.ctx-help:focus-visible .ctx-help-icon { border-color: #0969da; color: #0969da; }
+.ctx-help-tip {
+  display: none; position: absolute; left: 0; top: calc(100% + 0.35rem); z-index: 50;
+  width: max-content; max-width: 24rem; padding: 0.5rem 0.65rem;
+  font-size: 0.8rem; font-weight: normal; color: #1f2328; line-height: 1.4;
+  background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(31, 35, 40, 0.12);
+}
+.ctx-help:hover .ctx-help-tip,
+.ctx-help:focus-within .ctx-help-tip { display: block; }
+.ctx-help-tip mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
 .meta { font-size: 0.9rem; color: #57606a; margin-bottom: 1rem; }
-.legend { margin: 0 0 0.75rem; }
 .page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; padding: 0 1.5rem 0.75rem; font-size: 0.9rem; color: #57606a; }
 .page-toolbar label { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 0.35rem; }
 .layout-body { padding: 0 1.5rem 1.5rem; }
 .layout-body.pinned { display: flex; flex-direction: column; height: calc(100vh - 11rem); min-height: 12rem; overflow: hidden; }
-.legend mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
 .ctx-index { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem 1rem; margin: 0 0 1rem; flex-shrink: 0; overflow: auto; resize: vertical; min-height: 5rem; max-height: 75vh; }
 .layout-body.pinned .ctx-index { height: 38vh; margin-bottom: 0.75rem; }
 .layout-body:not(.pinned) .ctx-index { max-height: 38vh; }
