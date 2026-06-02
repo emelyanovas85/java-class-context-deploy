@@ -3,6 +3,7 @@ package ru.kalinin.context.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import ru.kalinin.context.model.ContextResponse;
+import ru.kalinin.context.model.FileContext;
 import ru.kalinin.context.model.UnchangedClassContext;
 
 import java.util.List;
@@ -17,8 +18,12 @@ class HtmlContextRendererTest {
         HtmlContextRenderer renderer = new HtmlContextRenderer(new ObjectMapper());
         ContextResponse response = new ContextResponse(
                 null,
-                List.of(new UnchangedClassContext(
-                        1, "com.example.Foo", 0, Set.of(), "main", List.of())),
+                List.of(new FileContext(
+                        "src/main/java/com/example/Foo.java",
+                        "main",
+                        0,
+                        List.of(new UnchangedClassContext(
+                                1, "com.example.Foo", 0, Set.of(), "main", List.of())))),
                 2,
                 1);
 

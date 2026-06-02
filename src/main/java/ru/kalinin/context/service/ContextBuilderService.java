@@ -303,7 +303,9 @@ public class ContextBuilderService {
 
         List<ClassContext> resultContexts =
                 enrichAndFilterContexts(allContexts, allParsed, qNameToId, nestedToRootTopLevel);
-        return new ContextResponse(mrInfo, resultContexts, request.depth(), resultContexts.size());
+        List<FileContext> resultFiles = groupContextsByFile(resultContexts, allParsed);
+        int totalClasses = resultContexts.size();
+        return new ContextResponse(mrInfo, resultFiles, request.depth(), totalClasses);
     }
 
     // ── mergeResults ────────────────────────────────────────────────────────────────
@@ -605,6 +607,57 @@ public class ContextBuilderService {
             result.add(callers.equals(ctxOut.callerIds()) ? ctxOut : withCallerIds(ctxOut, callers));
         }
         return result;
+    }
+
+    /**
+     * Группирует {@link ClassContext} по {@code .java}-файлу (package-private соседи
+     * в одном файле остаются вместе, даже при разных {@code level}).
+     */
+    static List<FileContext> groupContextsByFile(
+            List<ClassContext> contexts,
+            List<ClassStructure> allParsed) {
+        Map<String, String> qNameToFile = buildQNameToSourceFileMap(allParsed);
+
+        record FileKey(String module, String path) {}
+
+        Map<FileKey, List<ClassContext>> grouped = new LinkedHashMap<>();
+        for (ClassContext ctx : contexts) {
+            String path = qNameToFile.getOrDefault(ctx.name(), fallbackSourcePath(ctx.name()));
+            FileKey key = new FileKey(ctx.module(), path);
+            grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(ctx);
+        }
+
+        List<FileContext> files = new ArrayList<>(grouped.size());
+        for (Map.Entry<FileKey, List<ClassContext>> e : grouped.entrySet()) {
+            List<ClassContext> classes = new ArrayList<>(e.getValue());
+            classes.sort(Comparator.comparingInt(ClassContext::level).thenComparingInt(ClassContext::id));
+            int minLevel = classes.stream().mapToInt(ClassContext::level).min().orElse(0);
+            files.add(new FileContext(
+                    e.getKey().path(), e.getKey().module(), minLevel, List.copyOf(classes)));
+        }
+        files.sort(Comparator.comparingInt(FileContext::level).thenComparing(FileContext::path));
+        return files;
+    }
+
+    private static Map<String, String> buildQNameToSourceFileMap(List<ClassStructure> allParsed) {
+        Map<String, String> map = new LinkedHashMap<>();
+        for (ClassStructure root : allParsed) {
+            indexQNameToSourceFile(root, map);
+        }
+        return map;
+    }
+
+    private static void indexQNameToSourceFile(ClassStructure cs, Map<String, String> map) {
+        if (cs.sourceFile() != null) {
+            map.put(cs.qualifiedName(), cs.sourceFile());
+        }
+        for (ClassStructure nested : cs.nestedClasses()) {
+            indexQNameToSourceFile(nested, map);
+        }
+    }
+
+    private static String fallbackSourcePath(String qualifiedName) {
+        return qualifiedName.replace('.', '/') + ".java";
     }
 
     private static void redirectCallersFromNestedToOuter(

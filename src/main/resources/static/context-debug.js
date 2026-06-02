@@ -9,7 +9,8 @@
   if (!dataEl) return;
 
   const DATA = JSON.parse(dataEl.textContent);
-  const classes = DATA.classes || [];
+  const files = DATA.files || [];
+  const classes = flattenClasses(files);
 
   const allQualifiedNames = collectAllQualifiedNames(classes);
   const contextIdByName = buildContextIdByName(classes);
@@ -19,8 +20,8 @@
 
   document.getElementById('type-count').textContent = String(allQualifiedNames.size);
   renderMeta(DATA);
-  renderIndex(classes);
-  renderSections(classes, highlightPatterns);
+  renderIndex(files);
+  renderSections(files, highlightPatterns);
   initPinLayout();
 
   function initPinLayout() {
@@ -50,33 +51,65 @@
     el.innerHTML = html;
   }
 
-  function renderIndex(classes) {
+  function flattenClasses(files) {
+    const out = [];
+    for (const file of files) {
+      if (file.classes) out.push(...file.classes);
+    }
+    return out;
+  }
+
+  function renderIndex(files) {
     const nav = document.getElementById('ctx-index');
-    if (!classes.length) {
+    if (!files.length) {
       nav.innerHTML = '';
       return;
     }
-    let html = '<h2>Оглавление (' + classes.length + ')</h2><ol>';
-    classes.forEach((ctx, i) => {
-      html += '<li>' + classLinkHtml(sectionId(i + 1), ctx) + '</li>';
+    let html = '<h2>Оглавление (' + files.length + ')</h2><ol>';
+    files.forEach((file, i) => {
+      const sid = sectionId(i + 1);
+      const names = (file.classes || []).map(c => c.name).join(', ');
+      html += '<li><a href="#' + sid + '">' + escapeHtml(file.path || '') + '</a>';
+      html += ' <span class="ctx-meta">[level=' + file.level + ', module=' + escapeHtml(file.module || '') + ']</span>';
+      if (names) html += '<br><span class="ctx-meta">' + escapeHtml(names) + '</span>';
+      html += '</li>';
     });
     html += '</ol>';
     nav.innerHTML = html;
   }
 
-  function renderSections(classes, patterns) {
+  function renderSections(files, patterns) {
     const main = document.getElementById('ctx-sections');
     let html = '';
-    classes.forEach((ctx, i) => {
+    files.forEach((file, i) => {
       const index = i + 1;
       const sid = sectionId(index);
-      const body = highlightToSafeHtml(formatClassBody(ctx), patterns);
+      const body = highlightToSafeHtml(formatFileBody(file), patterns);
       html += '<section class="ctx-block" id="' + sid + '"><h2>';
       html += '<span class="section-idx">#' + index + '</span>';
-      html += classLinkHtml(sid, ctx);
+      html += '<a href="#' + sid + '">' + escapeHtml(file.path || '') + '</a>';
+      html += ' <span class="ctx-meta">[level=' + file.level + ', module=' + escapeHtml(file.module || '') + ']</span>';
       html += '</h2><pre class="ctx">' + body + '</pre></section>';
     });
     main.innerHTML = html;
+  }
+
+  function formatFileBody(file) {
+    const sorted = [...(file.classes || [])].sort((a, b) => {
+      if (a.level !== b.level) return a.level - b.level;
+      return a.id - b.id;
+    });
+    return sorted.map(ctx => formatClassSection(ctx)).join('\n\n');
+  }
+
+  function formatClassSection(ctx) {
+    const header = '### ' + ctx.name + '  [level=' + ctx.level + ', id=' + ctx.id
+        + ', callers=' + JSON.stringify(ctx.callerIds || [])
+        + ', module=' + (ctx.module || '') + ']';
+    if (ctx.kind === 'unchanged') {
+      return header + '  [unchanged]\n' + formatClassBody(ctx);
+    }
+    return header + '\n' + formatClassBody(ctx);
   }
 
   function classLinkHtml(sectionId, ctx) {
