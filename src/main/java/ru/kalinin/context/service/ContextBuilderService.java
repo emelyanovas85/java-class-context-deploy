@@ -106,6 +106,12 @@ public class ContextBuilderService {
     // ── buildContext ─────────────────────────────────────────────────────────────────
 
     public ContextResponse buildContext(ContextRequest request) {
+        try (var ignored = parseCache.beginScope()) {
+            return buildContextInternal(request);
+        }
+    }
+
+    private ContextResponse buildContextInternal(ContextRequest request) {
         MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), request.mergeRequestIid());
