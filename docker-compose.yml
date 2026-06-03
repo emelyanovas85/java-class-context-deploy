@@ -1,0 +1,18 @@
+services:
+  java-context-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - artifacts-data:/app/artifacts
+    environment:
+      APP_PARSE_CACHE_ENABLED: "true"
+      APP_PARSE_CACHE_DIR: /app/artifacts
+      APP_ARTIFACTS_DIR: /app/artifacts
+      LOGGING_LEVEL_RU_KALININ_CONTEXT: INFO
+    restart: unless-stopped
+
+volumes:
+  artifacts-data:
