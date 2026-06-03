@@ -1,0 +1,539 @@
+(function () {
+  'use strict';
+
+  const ROWS_WIDTH = 10;
+  const INDENT_SIZE = 4;
+  const KEY_PIN = 'ctx-index-pinned';
+  const LOAD_ERROR_MESSAGE = 'Страница не может быть загружена.';
+
+  bootstrap();
+
+  async function bootstrap() {
+    const dataEl = document.getElementById('ctx-data');
+    if (!dataEl || !dataEl.textContent.trim()) {
+      failLoad(new Error('ctx-data is empty'));
+      return;
+    }
+
+    await new Promise(resolve => requestAnimationFrame(resolve));
+
+    let data;
+    try {
+      data = JSON.parse(dataEl.textContent);
+    } catch (e) {
+      failLoad(e);
+      return;
+    }
+
+    try {
+      renderApp(data);
+      finishLoad();
+    } catch (e) {
+      failLoad(e);
+    }
+  }
+
+  function finishLoad() {
+    document.body.classList.remove('is-loading');
+  }
+
+  function failLoad(err) {
+    if (err) console.error('Context debug page load failed', err);
+    document.body.classList.add('is-error');
+    const loadingText = document.querySelector('.ctx-loading-text');
+    if (loadingText) {
+      loadingText.textContent = LOAD_ERROR_MESSAGE;
+    }
+    const spinner = document.querySelector('.ctx-spinner');
+    if (spinner) spinner.style.display = 'none';
+    window.alert(LOAD_ERROR_MESSAGE);
+  }
+
+  function renderApp(data) {
+    const files = data.files || [];
+    const classes = flattenClasses(files);
+
+    const allQualifiedNames = collectAllQualifiedNames(classes);
+    const contextIdByName = buildContextIdByName(classes);
+    const nestedToRootTop = buildNestedToRootTopLevel(classes);
+    const highlightPatterns = buildHighlightPatterns(
+        allQualifiedNames, contextIdByName, nestedToRootTop);
+
+    document.getElementById('type-count').textContent = String(allQualifiedNames.size);
+    renderMeta(data);
+    renderIndex(files);
+    renderSections(files, highlightPatterns);
+    initPinLayout();
+  }
+
+  function initPinLayout() {
+    const cb = document.getElementById('pin-index');
+    const layout = document.getElementById('layout-body');
+    if (!cb || !layout) return;
+    const saved = localStorage.getItem(KEY_PIN);
+    if (saved !== null) cb.checked = saved === '1';
+    const apply = () => {
+      layout.classList.toggle('pinned', cb.checked);
+      localStorage.setItem(KEY_PIN, cb.checked ? '1' : '0');
+    };
+    cb.addEventListener('change', apply);
+    apply();
+  }
+
+  function renderMeta(data) {
+    const el = document.getElementById('page-meta');
+    const mr = data.mergeRequest;
+    let html = '';
+    if (mr) {
+      html += 'MR !' + escapeHtml(String(mr.iid)) + ' — ' + escapeHtml(mr.title || '');
+      html += '<br>source: <code>' + escapeHtml(mr.sourceBranch || '') + '</code>';
+      html += ' → target: <code>' + escapeHtml(mr.targetBranch || '') + '</code><br>';
+    }
+    html += 'depth=' + (data.requestedDepth ?? '') + ', classes=' + (data.totalClassesAnalyzed ?? '');
+    el.innerHTML = html;
+  }
+
+  function flattenClasses(files) {
+    const out = [];
+    for (const file of files) {
+      if (file.classes) out.push(...file.classes);
+    }
+    return out;
+  }
+
+  const JAVA_SOURCE_PREFIXES = [
+    'src/main/java/',
+    'src/test/java/',
+    'src/main/kotlin/',
+  ];
+
+  function renderIndex(files) {
+    const nav = document.getElementById('ctx-index');
+    if (!files.length) {
+      nav.innerHTML = '';
+      return;
+    }
+    let html = '<h2>Оглавление (' + files.length + ')</h2><ol>';
+    files.forEach((file, i) => {
+      const sid = sectionId(i + 1);
+      html += '<li>' + renderFileHeadingHtml(file, sid) + renderFileClassListHtml(file) + '</li>';
+    });
+    html += '</ol>';
+    nav.innerHTML = html;
+  }
+
+  function renderSections(files, patterns) {
+    const main = document.getElementById('ctx-sections');
+    let html = '';
+    files.forEach((file, i) => {
+      const index = i + 1;
+      const sid = sectionId(index);
+      const body = highlightToSafeHtml(formatFileBody(file), patterns);
+      html += '<section class="ctx-block" id="' + sid + '"><h2>';
+      html += '<span class="section-idx">#' + index + '</span>';
+      html += renderFileHeadingHtml(file, sid);
+      html += '</h2>';
+      html += renderFileClassListHtml(file);
+      html += '<pre class="ctx">' + body + '</pre></section>';
+    });
+    main.innerHTML = html;
+  }
+
+  /** Путь относительно {@code src/.../java/} (как в IDE), иначе как есть (jar). */
+  function displayFilePath(path) {
+    if (!path) return '';
+    for (const prefix of JAVA_SOURCE_PREFIXES) {
+      const idx = path.indexOf(prefix);
+      if (idx >= 0) return path.substring(idx + prefix.length);
+    }
+    return path;
+  }
+
+  function renderFileHeadingHtml(file, sectionId) {
+    const label = displayFilePath(file.path || '');
+    let html = '<a href="#' + sectionId + '">' + escapeHtml(label) + '</a>';
+    html += ' <span class="ctx-meta">[module=' + escapeHtml(file.module || '') + ']</span>';
+    return html;
+  }
+
+  function renderFileClassListHtml(file) {
+    const sorted = sortedFileClasses(file);
+    if (!sorted.length) return '';
+    let html = '<ul class="ctx-class-list">';
+    for (const ctx of sorted) {
+      html += '<li><sname>' + simpleName(ctx.name) + '</sname>' + escapeHtml(formatClassBulletInfo(ctx)) + '</li>';
+    }
+    html += '</ul>';
+    return html;
+  }
+
+  function sortedFileClasses(file) {
+    return [...(file.classes || [])].sort((a, b) => {
+      if (a.level !== b.level) return a.level - b.level;
+      return a.id - b.id;
+    });
+  }
+
+  function formatClassBulletInfo(ctx) {
+    const callers = ctx.callerIds ? [...ctx.callerIds].sort((a, b) => a - b).join(',') : '';
+    return ' [level=' + ctx.level + ', id=' + ctx.id + ', callers=[' + callers + ']]';
+  }
+
+  function formatFileBody(file) {
+    return sortedFileClasses(file).map(ctx => formatClassSection(ctx)).join('\n\n');
+  }
+
+  function formatClassSection(ctx) {
+    const header = '### ' + ctx.name + '  [level=' + ctx.level + ', id=' + ctx.id
+        + ', callers=' + JSON.stringify(ctx.callerIds || [])
+        + ', module=' + (ctx.module || '') + ']';
+    if (ctx.kind === 'unchanged') {
+      return header + '  [unchanged]\n' + formatClassBody(ctx);
+    }
+    return header + '\n' + formatClassBody(ctx);
+  }
+
+  function formatClassBody(ctx) {
+    if (ctx.kind === 'unchanged' || (ctx.structure && !ctx.structureSource)) {
+      return renderStructure(ctx.structure || [], 0);
+    }
+    let sb = '';
+    if (ctx.structureSource) {
+      sb += '#### [branch=source]\n';
+      sb += renderStructure(ctx.structureSource, 0) + '\n';
+    }
+    if (ctx.structureTarget) {
+      sb += '#### [branch=target]\n';
+      sb += renderStructure(ctx.structureTarget, 0);
+    }
+    return sb;
+  }
+
+  function sectionId(index) {
+    return 'ctx-' + index;
+  }
+
+  function collectAllQualifiedNames(classes) {
+    const qnames = new Set();
+    for (const ctx of classes) {
+      qnames.add(ctx.name);
+      for (const roots of structureRoots(ctx)) {
+        collectNestedFromStructure(roots, ctx.name, qnames);
+      }
+    }
+    return qnames;
+  }
+
+  function buildContextIdByName(classes) {
+    const map = new Map();
+    for (const ctx of classes) {
+      map.set(ctx.name, ctx.id);
+    }
+    return map;
+  }
+
+  /** nested qualified name → top-level outer qualified name (контекст файла). */
+  function buildNestedToRootTopLevel(classes) {
+    const map = new Map();
+    for (const ctx of classes) {
+      for (const roots of structureRoots(ctx)) {
+        mapNestedToRootTop(roots, ctx.name, map);
+      }
+    }
+    return map;
+  }
+
+  function mapNestedToRootTop(nodes, rootTopQn, map) {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (isTypeNode(node)) {
+        const simple = simpleNameFromSignature(node.signature, node.type);
+        const isOuterShell = simple && simple === simpleName(rootTopQn);
+        if (simple && !isOuterShell) {
+          const nestedQn = rootTopQn + '.' + simple;
+          map.set(nestedQn, rootTopQn);
+          if (node.children) mapNestedToRootTop(node.children, rootTopQn, map);
+        } else if (node.children) {
+          mapNestedToRootTop(node.children, rootTopQn, map);
+        }
+      } else if (node.children) {
+        mapNestedToRootTop(node.children, rootTopQn, map);
+      }
+    }
+  }
+
+  /** id контекста: для nested всегда id top-level outer, иначе свой. */
+  function resolveContextId(qualifiedName, contextIdByName, nestedToRootTop) {
+    const root = nestedToRootTop.get(qualifiedName);
+    if (root && contextIdByName.has(root)) {
+      return contextIdByName.get(root);
+    }
+    if (contextIdByName.has(qualifiedName)) {
+      return contextIdByName.get(qualifiedName);
+    }
+    return undefined;
+  }
+
+  function structureRoots(ctx) {
+    if (ctx.kind === 'unchanged' || (ctx.structure && !ctx.structureSource)) {
+      return ctx.structure ? [ctx.structure] : [];
+    }
+    const roots = [];
+    if (ctx.structureSource) roots.push(ctx.structureSource);
+    if (ctx.structureTarget) roots.push(ctx.structureTarget);
+    return roots;
+  }
+
+  function collectNestedFromStructure(nodes, enclosingQn, qnames) {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (isTypeNode(node)) {
+        const simple = simpleNameFromSignature(node.signature, node.type);
+        const isOuterShell = simple && simple === simpleName(enclosingQn);
+        if (simple && !isOuterShell) {
+          const nestedQn = enclosingQn + '.' + simple;
+          qnames.add(nestedQn);
+          if (node.children) collectNestedFromStructure(node.children, nestedQn, qnames);
+        } else if (node.children) {
+          collectNestedFromStructure(node.children, enclosingQn, qnames);
+        }
+      } else if (node.children) {
+        collectNestedFromStructure(node.children, enclosingQn, qnames);
+      }
+    }
+  }
+
+  function isTypeNode(node) {
+    return ['class', 'interface', 'enum', 'record', 'annotation'].includes(node.type);
+  }
+
+  function simpleNameFromSignature(signature, kind) {
+    if (!signature || !signature.trim()) return null;
+    const keywords = { class: 'class', interface: 'interface', record: 'record', enum: 'enum', annotation: '@interface' };
+    const keyword = keywords[kind];
+    if (keyword) {
+      const idx = signature.indexOf(keyword);
+      if (idx >= 0) {
+        const rest = signature.substring(idx + keyword.length).trim();
+        let name = '';
+        for (let i = 0; i < rest.length; i++) {
+          const c = rest.charAt(i);
+          if (/[\w\u0400-\u04FF$]/.test(c)) name += c;
+          else break;
+        }
+        if (name) return name;
+      }
+    }
+    const parts = signature.trim().split(/\s+/);
+    return parts.length ? parts[parts.length - 1] : null;
+  }
+
+  function buildHighlightPatterns(qualifiedNames, contextIdByName, nestedToRootTop) {
+    if (!qualifiedNames.size) return [];
+    const textToQn = new Map();
+    const sortedQns = [...qualifiedNames].sort((a, b) => b.length - a.length);
+    for (const qn of sortedQns) {
+      for (const suffix of dottedSuffixes(qn)) {
+        putPattern(textToQn, suffix, qn);
+      }
+    }
+    return [...textToQn.entries()]
+        .sort((a, b) => b[0].length - a[0].length)
+        .map(([text, qualifiedName]) => ({
+          text,
+          qualifiedName,
+          contextId: resolveContextId(qualifiedName, contextIdByName, nestedToRootTop),
+        }));
+  }
+
+  /** Все суффиксы по точкам: a.b.C → [a.b.C, b.C, C]. */
+  function dottedSuffixes(qn) {
+    const suffixes = [qn];
+    for (let dot = qn.indexOf('.'); dot >= 0; dot = qn.indexOf('.', dot + 1)) {
+      suffixes.push(qn.substring(dot + 1));
+    }
+    return suffixes;
+  }
+
+  function formatMarkTitle(pattern) {
+    const qn = pattern.qualifiedName;
+    const id = pattern.contextId;
+    if (id !== undefined && id !== null) {
+      return escapeHtml(qn + ' (id=' + id + ')');
+    }
+    return escapeHtml(qn);
+  }
+
+  function putPattern(map, text, qn) {
+    if (!map.has(text)) map.set(text, qn);
+  }
+
+  function isTypeTokenAt(text, start, end) {
+    return isLeftTypeBoundaryAt(text, start) && isRightTypeBoundaryAt(text, end);
+  }
+
+  function isLeftTypeBoundary(c) {
+    return c === '@' || c === ',' || c === '<' || c === '(' || c === '[' || /\s/.test(c);
+  }
+
+  function isRightTypeBoundary(c) {
+    return c === '.' || c === '<' || c === '>' || c === ',' || c === ')' || c === '(' || c === ']'
+        || c === ';' || c === '[' || c === ':' || /\s/.test(c);
+  }
+
+  /** Слева от типа: символ-граница или {@code &lt;} (если текст уже экранирован). */
+  function isLeftTypeBoundaryAt(text, start) {
+    if (start <= 0) return true;
+    if (isLeftTypeBoundary(text.charAt(start - 1))) return true;
+    return start >= 4 && text.substring(start - 4, start) === '&lt;';
+  }
+
+  /** Справа от типа: символ-граница или {@code &lt;}/{@code &gt;}. */
+  function isRightTypeBoundaryAt(text, end) {
+    if (end >= text.length) return true;
+    if (isRightTypeBoundary(text.charAt(end))) return true;
+    return text.startsWith('&lt;', end) || text.startsWith('&gt;', end);
+  }
+
+  /** Строки заголовков в &lt;pre&gt; — без подсветки типов. */
+  function isHighlightSkippedLine(line) {
+    return line.startsWith('### ') || line.startsWith('#### ');
+  }
+
+  /**
+   * Подсветка по «сырому» тексту (Foo&lt;Bar&gt; в сигнатуре), затем безопасный HTML.
+   * Не использовать highlight после escapeHtml — границы generics ломаются.
+   */
+  function highlightToSafeHtml(text, patterns) {
+    if (!text) return '';
+    if (!patterns.length) return escapeHtml(text);
+
+    const lines = text.split('\n');
+    let out = '';
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) out += '\n';
+      const line = lines[i];
+      out += isHighlightSkippedLine(line)
+          ? escapeHtml(line)
+          : highlightLineToSafeHtml(line, patterns);
+    }
+    return out;
+  }
+
+  function highlightLineToSafeHtml(text, patterns) {
+    if (!text) return '';
+    if (!patterns.length) return escapeHtml(text);
+
+    let out = '';
+    let pos = 0;
+
+    while (pos < text.length) {
+      let best = null;
+      for (const p of patterns) {
+        const end = pos + p.text.length;
+        if (text.startsWith(p.text, pos) && isTypeTokenAt(text, pos, end)) {
+          if (!best || p.text.length > best.text.length) best = p;
+        }
+      }
+      if (!best) {
+        out += escapeHtml(text.charAt(pos));
+        pos++;
+      } else {
+        out += '<mark class="ctx-type" title="' + formatMarkTitle(best) + '">'
+            + escapeHtml(best.text) + '</mark>';
+        pos += best.text.length;
+      }
+    }
+    return out;
+  }
+
+  function simpleName(qn) {
+    const dot = qn.lastIndexOf('.');
+    return dot < 0 ? qn : qn.substring(dot + 1);
+  }
+
+  function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+  }
+
+  // ── StructureNodePrinter (порт) ─────────────────────────────────────────
+
+  function renderStructure(nodes, depth) {
+    if (!nodes || !nodes.length) return '';
+    let sb = '';
+    for (const node of sortedNodes(nodes)) {
+      sb += renderNode(node, depth);
+    }
+    return sb;
+  }
+
+  function renderNode(node, depth) {
+    const indent = ' '.repeat(INDENT_SIZE * depth);
+    const sigLines = splitSignature(node.signature);
+    const range = parseRange(node.rows);
+    let sb = '';
+
+    for (let i = 0; i < sigLines.length; i++) {
+      let cell;
+      if (!range) {
+        cell = i === 0 ? formatRows(node.rows) : ' '.repeat(ROWS_WIDTH);
+      } else {
+        const lineNo = range[0] + i;
+        if (i === sigLines.length - 1) {
+          cell = formatRows(lineNo === range[1] ? String(lineNo) : lineNo + '-' + range[1]);
+        } else {
+          cell = formatRows(String(lineNo));
+        }
+      }
+      sb += '|' + cell + '|' + indent + sigLines[i] + '\n';
+    }
+
+    if (node.children) {
+      for (const child of sortedNodes(node.children)) {
+        sb += renderNode(child, depth + 1);
+      }
+    }
+    return sb;
+  }
+
+  function parseRange(rows) {
+    if (!rows || !rows.trim()) return null;
+    try {
+      const dash = rows.indexOf('-');
+      if (dash < 0) {
+        const v = parseInt(rows.trim(), 10);
+        return [v, v];
+      }
+      const start = parseInt(rows.substring(0, dash).trim(), 10);
+      const end = parseInt(rows.substring(dash + 1).trim(), 10);
+      return [start, end];
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function sortedNodes(nodes) {
+    return [...nodes].sort((a, b) => startLine(a) - startLine(b));
+  }
+
+  function startLine(node) {
+    const range = parseRange(node.rows);
+    return range ? range[0] : Number.MAX_SAFE_INTEGER;
+  }
+
+  function formatRows(rows) {
+    if (!rows || !rows.trim()) return ' '.repeat(ROWS_WIDTH);
+    if (rows.length >= ROWS_WIDTH) return rows.substring(0, ROWS_WIDTH);
+    return rows.padStart(ROWS_WIDTH);
+  }
+
+  function splitSignature(signature) {
+    if (!signature || !signature.trim()) return [''];
+    return signature.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  }
+})();

@@ -8,6 +8,12 @@ spring:
     serialization:
       indent-output: true
 
+app:
+  parse-cache:
+    enabled: true
+    dir: artifacts
+    expire-after-access-minutes: 5
+
 logging:
   level:
     ru.kalinin.context: DEBUG

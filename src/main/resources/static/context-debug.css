@@ -1,0 +1,70 @@
+body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 0; background: #f6f8fa; color: #1f2328; }
+body.is-loading { overflow: hidden; }
+body.is-loading .ctx-app { visibility: hidden; }
+body.is-error .ctx-app { display: none; }
+body.is-error .ctx-loading { display: flex; }
+.ctx-loading {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1rem; background: #f6f8fa; color: #57606a;
+}
+body:not(.is-loading) .ctx-loading { display: none; }
+.ctx-loading-text { margin: 0; font-size: 0.95rem; }
+.ctx-spinner {
+  width: 2.5rem; height: 2.5rem;
+  border: 3px solid #d0d7de; border-top-color: #0969da;
+  border-radius: 50%; animation: ctx-spin 0.75s linear infinite;
+}
+@keyframes ctx-spin { to { transform: rotate(360deg); } }
+.page-header { padding: 1.5rem 1.5rem 0; }
+h1.page-title {
+  font-size: 1.25rem; margin: 0 0 0.5rem;
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.ctx-help { position: relative; display: inline-flex; outline: none; }
+.ctx-help-icon {
+  font-size: 0.65rem; width: 1rem; height: 1rem;
+  border-radius: 50%; border: 1px solid #8c959f;
+  color: #57606a; background: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: help; font-weight: 600; line-height: 1;
+}
+.ctx-help:hover .ctx-help-icon,
+.ctx-help:focus-visible .ctx-help-icon { border-color: #0969da; color: #0969da; }
+.ctx-help-tip {
+  display: none; position: absolute; left: 0; top: calc(100% + 0.35rem); z-index: 50;
+  width: max-content; max-width: 24rem; padding: 0.5rem 0.65rem;
+  font-size: 0.8rem; font-weight: normal; color: #1f2328; line-height: 1.4;
+  background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(31, 35, 40, 0.12);
+}
+.ctx-help:hover .ctx-help-tip,
+.ctx-help:focus-within .ctx-help-tip { display: block; }
+.ctx-help-tip mark.ctx-type { background: #fff8c5; border-radius: 2px; padding: 0 2px; }
+.meta { font-size: 0.9rem; color: #57606a; margin-bottom: 1rem; }
+.page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; padding: 0 1.5rem 0.75rem; font-size: 0.9rem; color: #57606a; }
+.page-toolbar label { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 0.35rem; }
+.layout-body { padding: 0 1.5rem 1.5rem; }
+.layout-body.pinned { display: flex; flex-direction: column; height: calc(100vh - 11rem); min-height: 12rem; overflow: hidden; }
+.ctx-index { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem 1rem; margin: 0 0 1rem; flex-shrink: 0; overflow: auto; resize: vertical; min-height: 5rem; max-height: 75vh; }
+.layout-body.pinned .ctx-index { height: 38vh; margin-bottom: 0.75rem; }
+.layout-body:not(.pinned) .ctx-index { max-height: 38vh; }
+.ctx-index h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+.ctx-index ol { margin: 0; padding-left: 1.5rem; }
+.ctx-index li { margin: 0.35rem 0; margin-left: 10px; }
+.ctx-class-list { margin: 0.25rem 0 0; padding: 0 0 0 0.25rem; list-style: none; font-size: 0.85em; color: #57606a; }
+.ctx-class-list li::before { content: '- '; }
+sname { font-size: 1em; color: black; }
+.ctx-block .ctx-class-list { margin-bottom: 0.5rem; }
+.ctx-index a { color: #0969da; text-decoration: none; }
+.ctx-index a:hover { text-decoration: underline; }
+.ctx-sections { min-height: 0; }
+.layout-body.pinned .ctx-sections { flex: 1 1 auto; overflow-y: auto; padding-right: 0.25rem; }
+.ctx-block { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; margin: 1rem 0; padding: 0.75rem 1rem; }
+.layout-body.pinned .ctx-block:first-child { margin-top: 0; }
+.ctx-block h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: #0969da; }
+.ctx-block .section-idx { color: #57606a; font-weight: normal; margin-right: 0.35rem; }
+.ctx-meta { color: #57606a; font-size: 0.85em; font-weight: normal; }
+.ctx-index .ctx-meta { font-size: 0.75em; }
+pre.ctx { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+mark.ctx-type { background: #fff8c5; border-bottom: 1px solid #d4a72c; border-radius: 2px; padding: 0 1px; cursor: help; }

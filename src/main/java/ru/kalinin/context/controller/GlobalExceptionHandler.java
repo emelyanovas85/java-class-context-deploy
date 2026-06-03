@@ -7,6 +7,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import ru.kalinin.context.exception.MergeRequestAlreadyMergedException;
 
 import java.util.stream.Collectors;
 
@@ -21,6 +22,15 @@ public class GlobalExceptionHandler {
                 .collect(Collectors.joining("; "));
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, message);
         pd.setTitle("Validation failed");
+        return pd;
+    }
+
+    @ExceptionHandler(MergeRequestAlreadyMergedException.class)
+    public ProblemDetail handleMerged(MergeRequestAlreadyMergedException ex) {
+        log.warn(ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+                HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+        pd.setTitle("Merge request already merged");
         return pd;
     }
 
