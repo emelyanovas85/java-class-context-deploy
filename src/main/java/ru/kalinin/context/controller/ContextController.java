@@ -16,9 +16,11 @@ import ru.kalinin.context.model.ContextRequest;
 import ru.kalinin.context.model.ContextResponse;
 import ru.kalinin.context.model.GitLabLinesRequest;
 import ru.kalinin.context.model.JarLinesRequest;
+import ru.kalinin.context.model.PlantUmlResponse;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.service.ContextBuilderService;
 import ru.kalinin.context.service.HtmlContextRenderer;
+import ru.kalinin.context.service.PlantUmlRenderer;
 import ru.kalinin.context.service.SourceLinesService;
 
 import java.time.Duration;
@@ -33,6 +35,7 @@ public class ContextController {
 
     private final ContextBuilderService contextBuilderService;
     private final HtmlContextRenderer htmlContextRenderer;
+    private final PlantUmlRenderer plantUmlRenderer;
     private final SourceLinesService sourceLinesService;
 
     // -------------------------------------------------------------------------
@@ -100,6 +103,71 @@ public class ContextController {
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_HTML)
                 .body(html);
+    }
+
+    @Operation(
+            summary = "Построить PlantUML class diagram",
+            description = """
+                    Те же параметры, что у POST /api/context. Строит контекст классов MR
+                    и возвращает текст диаграммы PlantUML: типы с полями и методами,
+                    наследование/реализацию и зависимости по callerIds.
+                    """
+    )
+    @ApiResponses({
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "PlantUML успешно построен",
+                    content = @Content(schema = @Schema(implementation = PlantUmlResponse.class))
+            ),
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema())),
+            @ApiResponse(responseCode = "500", description = "Ошибка GitLab API или парсинга",
+                    content = @Content(schema = @Schema()))
+    })
+    @PostMapping("/plantuml")
+    public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody ContextRequest request) {
+        log.info("Building PlantUML for MR !{} in project '{}', depth={}",
+                request.mergeRequestIid(), request.projectId(), request.depth());
+        Instant start = Instant.now();
+        ContextResponse context = contextBuilderService.buildContext(request);
+        String plantUml = plantUmlRenderer.render(context);
+        PlantUmlResponse response = new PlantUmlResponse(
+                context.mergeRequest(),
+                plantUml,
+                context.requestedDepth(),
+                context.totalClassesAnalyzed());
+        log.info("PlantUML built: {} classes   {} ms",
+                response.totalClassesAnalyzed(), Duration.between(start, Instant.now()).toMillis());
+        return ResponseEntity.ok(response);
+    }
+
+    @Operation(
+            summary = "Построить PlantUML (plain text)",
+            description = """
+                    Те же параметры, что у POST /api/plantuml. Возвращает только текст
+                    диаграммы (Content-Type: text/plain) для вставки в редактор PlantUML.
+                    """
+    )
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Текст PlantUML"),
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации",
+                    content = @Content(schema = @Schema())),
+            @ApiResponse(responseCode = "500", description = "Ошибка GitLab API или парсинга",
+                    content = @Content(schema = @Schema()))
+    })
+    @PostMapping(value = "/plantuml/text", produces = MediaType.TEXT_PLAIN_VALUE)
+    public ResponseEntity<String> getPlantUmlText(@Valid @RequestBody ContextRequest request) {
+        log.info("Building PlantUML text for MR !{} in project '{}', depth={}",
+                request.mergeRequestIid(), request.projectId(), request.depth());
+        Instant start = Instant.now();
+        ContextResponse context = contextBuilderService.buildContext(request);
+        String plantUml = plantUmlRenderer.render(context);
+        log.info("PlantUML text built for MR !{} ({} classes)   {} ms",
+                request.mergeRequestIid(), context.totalClassesAnalyzed(),
+                Duration.between(start, Instant.now()).toMillis());
+        return ResponseEntity.ok()
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(plantUml);
     }
 
     // -------------------------------------------------------------------------
