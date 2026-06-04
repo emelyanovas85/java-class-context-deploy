@@ -26,7 +26,11 @@ public class PlantUmlRenderer {
             "public", "private", "protected", "static", "final", "abstract",
             "synchronized", "volatile", "transient", "default", "native", "strictfp");
 
-    private static final Pattern EXTENDS = Pattern.compile("\\bextends\\s+([^<{]+)");
+    /** Имя Java-типа (в т.ч. кириллица). */
+    private static final String TYPE_NAME = "[\\p{L}_$][\\p{L}\\p{N}_$]*";
+
+    private static final Pattern EXTENDS =
+            Pattern.compile("\\bextends\\s+(" + TYPE_NAME + "(?:\\.[\\p{L}\\p{N}_$]+)*(?:<[^>]+>)?)");
     private static final Pattern IMPLEMENTS =
             Pattern.compile("\\bimplements\\s+(.+?)(?:\\s*\\{|\\s*$)");
     private static final Pattern ANNOTATION_INLINE =
@@ -56,9 +60,14 @@ public class PlantUmlRenderer {
         StringBuilder sb = new StringBuilder();
         sb.append("@startuml\n");
 
+        Set<String> rendered = new LinkedHashSet<>();
         for (ClassContext ctx : classes) {
             for (StructureNode node : structureNodes(ctx)) {
-                renderTypeBlock(node, sb);
+                String simple = simpleName(ctx.name());
+                if (!rendered.add(ctx.name())) {
+                    continue;
+                }
+                renderTypeBlock(ctx, node, simple, sb);
             }
         }
 
@@ -68,8 +77,7 @@ public class PlantUmlRenderer {
         return sb.toString();
     }
 
-    private void renderTypeBlock(StructureNode node, StringBuilder sb) {
-        String simple = simpleNameFromSignature(node.signature(), node.type());
+    private void renderTypeBlock(ClassContext ctx, StructureNode node, String simple, StringBuilder sb) {
         String header = PlantUmlSignatureConverter.typeHeader(node, simple);
         sb.append(header).append(" {\n");
 
@@ -259,15 +267,6 @@ public class PlantUmlRenderer {
         int dot = qualifiedName.lastIndexOf('.');
         int cut = Math.max(dollar, dot);
         return cut < 0 ? qualifiedName : qualifiedName.substring(cut + 1);
-    }
-
-    private static String simpleNameFromSignature(String signature, String kind) {
-        String line = lastDeclarationLine(signature);
-        line = stripAnnotations(line);
-        Pattern p = Pattern.compile("\\b(?:class|interface|enum|record|@interface)\\s+(\\w+)");
-        Matcher m = p.matcher(line);
-        if (m.find()) return m.group(1);
-        return "Unknown";
     }
 
     static String lastDeclarationLine(String signature) {

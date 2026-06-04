@@ -126,6 +126,35 @@ class PlantUmlRendererTest {
     void simpleNameExtractsLastSegment() {
         assertThat(PlantUmlRenderer.simpleName("test.credit.T6553")).isEqualTo("T6553");
         assertThat(PlantUmlRenderer.simpleName("com.example.Foo$Bar")).isEqualTo("Bar");
+        assertThat(PlantUmlRenderer.simpleName("enums.Пользователи")).isEqualTo("Пользователи");
+    }
+
+    @Test
+    void rendersCyrillicEnumNameFromQualifiedName() {
+        StructureNode node = new StructureNode(
+                "enum",
+                "public enum Пользователи",
+                "3-7",
+                List.of(
+                        new StructureNode("enum_constant", "user", "4", null),
+                        new StructureNode("enum_constant", "viktor", "5", null),
+                        new StructureNode("enum_constant", "oper_od", "6", null)));
+
+        ClassContext ctx = new UnchangedClassContext(
+                142, "enums.Пользователи", 2, Set.of(79), "bugbusters.modules:ASDCO-core:2.3.0",
+                List.of(node));
+
+        String uml = renderer.render(new ContextResponse(
+                null,
+                List.of(new FileContext("enums/Пользователи.java", "jar", 2, List.of(ctx))),
+                2,
+                1));
+
+        assertThat(uml).contains("enum Пользователи {");
+        assertThat(uml).contains("user");
+        assertThat(uml).contains("viktor");
+        assertThat(uml).contains("oper_od");
+        assertThat(uml).doesNotContain("Unknown");
     }
 
     @Test
