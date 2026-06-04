@@ -27,7 +27,7 @@ public record ContextRequest(
         @NotNull(message = "mergeRequestIid must not be null")
         Long mergeRequestIid,
 
-        @Schema(description = "Глубина контекста: 1 = только изменённые файлы, 2+ = + зависимости", example = "2", minimum = "1")
-        @Min(value = 1, message = "depth must be >= 1")
+        @Schema(description = "Глубина контекста: 0 = только изменённые файлы, 1+ = + зависимости", example = "2", minimum = "0")
+        @Min(value = 0, message = "depth must be >= 0")
         int depth
 ) {}
