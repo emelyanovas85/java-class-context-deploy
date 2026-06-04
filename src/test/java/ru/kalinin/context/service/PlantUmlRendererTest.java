@@ -127,4 +127,30 @@ class PlantUmlRendererTest {
         assertThat(PlantUmlRenderer.simpleName("test.credit.T6553")).isEqualTo("T6553");
         assertThat(PlantUmlRenderer.simpleName("com.example.Foo$Bar")).isEqualTo("Bar");
     }
+
+    @Test
+    void doesNotFailOnVoidMethodsAndMalformedSignatures() {
+        StructureNode node = new StructureNode(
+                "class",
+                "public class T6553 extends Scenario",
+                "1",
+                List.of(
+                        new StructureNode("method", "@Override protected void beforeScenario()", "2", null),
+                        new StructureNode("method", "void packagePrivate()", "3", null),
+                        new StructureNode("method", "public void t6553()", "4", null),
+                        new StructureNode("constructor", "public T6553()", "5", null),
+                        new StructureNode("method", "broken signature", "6", null)
+                ));
+
+        ClassContext ctx = new UnchangedClassContext(
+                1, "test.credit.T6553", 0, Set.of(), "test", List.of(node));
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("T6553.java", "test", 0, List.of(ctx))),
+                0,
+                1);
+
+        assertThat(renderer.render(response)).contains("@startuml").contains("@enduml");
+    }
 }

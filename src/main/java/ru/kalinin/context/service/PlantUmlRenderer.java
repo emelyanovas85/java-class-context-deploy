@@ -142,7 +142,7 @@ public class PlantUmlRenderer {
                                         Set<String> declaredSimpleNames,
                                         Set<String> drawn, StringBuilder sb, String arrow) {
         String target = simpleNameOfTypeRef(typeRef, qNameToSimple);
-        if (target.equals(from)) return;
+        if (target.isBlank() || target.equals(from)) return;
         if (!declaredSimpleNames.contains(target)) {
             sb.append("class ").append(target).append('\n');
             declaredSimpleNames.add(target);
@@ -155,6 +155,7 @@ public class PlantUmlRenderer {
 
     private static String simpleNameOfTypeRef(String typeRef, Map<String, String> qNameToSimple) {
         String normalized = typeRef.replaceAll("<[^>]*>", "").trim();
+        if (normalized.isEmpty()) return "";
         for (Map.Entry<String, String> e : qNameToSimple.entrySet()) {
             if (e.getKey().endsWith("." + normalized) || e.getKey().equals(normalized)) {
                 return e.getValue();
@@ -174,11 +175,14 @@ public class PlantUmlRenderer {
         for (StructureNode child : node.children()) {
             if ("field".equals(child.type())) {
                 String type = PlantUmlSignatureConverter.extractFieldType(child.signature());
-                if (type != null) {
+                if (type != null && !type.isBlank()) {
                     link(from, type, qNameToSimple, declaredSimpleNames, drawn, sb, "-->");
                 }
-            } else if ("method".equals(child.type()) || "constructor".equals(child.type())) {
+            } else if ("method".equals(child.type())) {
                 PlantUmlSignatureConverter.extractReferencedTypes(child.signature())
+                        .forEach(ref -> link(from, ref, qNameToSimple, declaredSimpleNames, drawn, sb, "-->"));
+            } else if ("constructor".equals(child.type())) {
+                PlantUmlSignatureConverter.extractParameterTypes(child.signature())
                         .forEach(ref -> link(from, ref, qNameToSimple, declaredSimpleNames, drawn, sb, "-->"));
             }
         }
@@ -200,6 +204,7 @@ public class PlantUmlRenderer {
                                             Map<String, String> qNameToSimple,
                                             Set<String> declaredSimpleNames) {
         String normalized = typeRef.replaceAll("<[^>]*>", "").trim();
+        if (normalized.isEmpty()) return null;
         if (normalized.contains(".")) {
             String simple = normalized.substring(normalized.lastIndexOf('.') + 1);
             if (declaredSimpleNames.contains(simple)) return simple;
@@ -333,8 +338,11 @@ public class PlantUmlRenderer {
             int paren = line.indexOf('(');
             if (paren < 0) return null;
 
+            int close = line.indexOf(')', paren);
+            if (close < 0) return null;
+
             String before = line.substring(0, paren).trim();
-            String params = line.substring(paren + 1, line.indexOf(')', paren));
+            String params = line.substring(paren + 1, close);
             String throwsPart = "";
             int throwsIdx = line.indexOf("throws", paren);
             if (throwsIdx > 0) {
@@ -355,6 +363,9 @@ public class PlantUmlRenderer {
                 if (returnType.contains("<")) {
                     returnType = returnType.substring(returnType.lastIndexOf('>') + 1).trim();
                 }
+                if (returnType.isEmpty()) {
+                    returnType = "void";
+                }
             }
 
             String paramTypes = formatParamTypes(params);
@@ -366,29 +377,57 @@ public class PlantUmlRenderer {
         }
 
         static List<String> extractReferencedTypes(String signature) {
+            List<String> refs = extractParameterTypes(signature);
+            String returnType = extractReturnType(signatureBeforeParams(signature));
+            if (startsWithUpperCase(returnType)) {
+                refs.add(returnType);
+            }
+            return refs;
+        }
+
+        static List<String> extractParameterTypes(String signature) {
             String line = stripAnnotations(signature);
             List<String> refs = new ArrayList<>();
             int paren = line.indexOf('(');
             if (paren < 0) return refs;
-            String params = line.substring(paren + 1, line.indexOf(')', paren));
+            int close = line.indexOf(')', paren);
+            if (close < 0) return refs;
+            String params = line.substring(paren + 1, close);
             for (String param : splitParams(params)) {
                 String type = paramType(param);
-                if (type != null && Character.isUpperCase(type.charAt(0))) {
+                if (startsWithUpperCase(type)) {
                     refs.add(type);
                 }
             }
-            if (!line.contains(" void ") && !line.trim().endsWith("void")) {
-                String before = line.substring(0, paren).trim();
-                String rt = removeModifiers(before);
-                int sp = rt.lastIndexOf(' ');
-                if (sp > 0) {
-                    String returnType = rt.substring(0, sp).trim();
-                    if (Character.isUpperCase(returnType.charAt(0))) {
-                        refs.add(returnType);
-                    }
-                }
-            }
             return refs;
+        }
+
+        private static String signatureBeforeParams(String signature) {
+            String line = stripAnnotations(signature);
+            int paren = line.indexOf('(');
+            return paren < 0 ? line : line.substring(0, paren).trim();
+        }
+
+        /** Возвращает тип результата метода или {@code null} для {@code void} / конструктора. */
+        private static String extractReturnType(String beforeParen) {
+            if (beforeParen.isEmpty()) return null;
+            String rt = removeModifiers(beforeParen);
+            if (rt.contains("<")) {
+                rt = rt.substring(rt.lastIndexOf('>') + 1).trim();
+            }
+            int sp = rt.lastIndexOf(' ');
+            if (sp < 0) {
+                return "void".equals(rt) ? null : rt;
+            }
+            String returnType = rt.substring(0, sp).trim();
+            if (returnType.isEmpty() || "void".equals(returnType)) {
+                return null;
+            }
+            return simplifyType(returnType);
+        }
+
+        private static boolean startsWithUpperCase(String s) {
+            return s != null && !s.isEmpty() && Character.isUpperCase(s.charAt(0));
         }
 
         private static String formatParamTypes(String params) {
@@ -425,8 +464,9 @@ public class PlantUmlRenderer {
         }
 
         private static String simplifyType(String type) {
-            if (type == null || type.isBlank()) return type;
+            if (type == null || type.isBlank()) return "";
             String t = type.replaceAll("\\s+", " ").trim();
+            if (t.isEmpty()) return "";
             if (t.contains(".")) {
                 return t.substring(t.lastIndexOf('.') + 1);
             }
