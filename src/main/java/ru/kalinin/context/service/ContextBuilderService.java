@@ -29,9 +29,11 @@ import java.util.stream.Collectors;
  * <ol>
  *   <li>Проверка состояния MR.</li>
  *   <li>Построение мёрженного файлового индекса.</li>
- *   <li>Сбор карты зависимостей: qualified name → путь к jar.</li>
+ *   <li>Сбор карты зависимостей: qualified name → путь к jar.
+ *       При {@code depth=0} этот шаг пропускается.</li>
  *   <li>Сборка wildcardResolver.</li>
- *   <li>Уровень 0: fetch + один parse на ветку (source/target); merge однопоточно.</li>
+ *   <li>Уровень 0: fetch + один parse на ветку (source/target); merge однопоточно.
+ *       При {@code depth=0} — единственный шаг, результат возвращается немедленно.</li>
  *   <li>Уровни 1..depth: волновой BFS — типы волны параллельно; кэш до I/O;
  *       один parse на файл ({@link ru.kalinin.context.parser.JavaSourceParseService});
  *       merge и формирование следующей волны — однопоточно.</li>
@@ -128,10 +130,17 @@ public class ContextBuilderService {
                 request.gitlabUrl(), request.token(),
                 request.projectId(), targetBranch, mrInfo.diffs());
 
-        Map<String, Path> dependencySources = dependencyContextService.collectDependencySources(
-                request.gitlabUrl(), request.token(),
-                request.projectId(), sourceBranch, fileIndex);
-        log.info("Dependency context: {} known external class names", dependencySources.size());
+        // При depth=0 зависимости не нужны — пропускаем дорогой сбор
+        Map<String, Path> dependencySources;
+        if (request.depth() == 0) {
+            log.info("depth=0: skipping dependency sources collection");
+            dependencySources = Map.of();
+        } else {
+            dependencySources = dependencyContextService.collectDependencySources(
+                    request.gitlabUrl(), request.token(),
+                    request.projectId(), sourceBranch, fileIndex);
+            log.info("Dependency context: {} known external class names", dependencySources.size());
+        }
 
         BiFunction<String, List<String>, Optional<String>> wildcardResolver =
                 buildWildcardResolver(fileIndex, dependencySources);
@@ -194,6 +203,16 @@ public class ContextBuilderService {
                     storeParseCache(src0, cs.qualifiedName(), r.parsed(), r.srcNodes(), ctx);
                 }
             }
+        }
+
+        // ── Ранний возврат при depth=0 ────────────────────────────────────────────────
+        if (request.depth() == 0) {
+            log.info("depth=0: returning level-0 context only ({} classes from {} changed files)",
+                    allContexts.size(), mrInfo.changedFiles().size());
+            List<ClassContext> resultContexts0 =
+                    enrichAndFilterContexts(allContexts, level0, qNameToId, nestedToRootTopLevel);
+            List<FileContext> resultFiles0 = groupContextsByFile(resultContexts0, level0);
+            return new ContextResponse(mrInfo, resultFiles0, 0, resultContexts0.size());
         }
 
         // ── Уровни 1..depth ─────────────────────────────────────────────────────────────
