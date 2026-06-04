@@ -13,44 +13,93 @@ class PlantUmlRendererTest {
     private final PlantUmlRenderer renderer = new PlantUmlRenderer();
 
     @Test
-    void rendersClassMembersInheritanceAndCallerRelation() {
-        StructureNode foo = new StructureNode(
+    void rendersClassicPlantUmlFormat() {
+        StructureNode authorization = new StructureNode(
                 "class",
-                "@Component\npublic class Foo extends BaseFoo implements IFoo",
-                "10-45",
+                "public class Authorization",
+                "1",
                 List.of(
-                        new StructureNode("field", "private final String name", "25", null),
-                        new StructureNode("method", "public static Foo of(String a, String b)", "30", null)
+                        new StructureNode("field", "private static ThreadLocal<User> currentUser", "2", null),
+                        new StructureNode("method", "public User getCurrentUser()", "3", null),
+                        new StructureNode("method", "public void authorize(User user)", "4", null),
+                        new StructureNode("method", "private void authorize(String login, String password)", "5", null),
+                        new StructureNode("method", "private void checkCredentials(String login, String password)", "6", null)
                 ));
 
-        ClassContext ctxFoo = new UnchangedClassContext(
-                1, "com.example.Foo", 0, Set.of(), "main", List.of(foo));
-        ClassContext ctxBar = new UnchangedClassContext(
-                2, "com.example.Bar", 1, Set.of(1), "main", List.of());
+        StructureNode userEnum = new StructureNode(
+                "enum",
+                "enum User",
+                "10",
+                List.of(
+                        new StructureNode("enum_constant", "TestUser", "11", null),
+                        new StructureNode("enum_constant", "LKNeolantTenaks", "12", null),
+                        new StructureNode("enum_constant", "ESODUser", "13", null),
+                        new StructureNode("enum_constant", "Boss", "14", null)
+                ));
+
+        ClassContext ctxAuth = new UnchangedClassContext(
+                1, "com.example.Authorization", 0, Set.of(), "main", List.of(authorization));
+        ClassContext ctxUser = new UnchangedClassContext(
+                2, "com.example.User", 0, Set.of(), "main", List.of(userEnum));
 
         ContextResponse response = new ContextResponse(
-                new MergeRequestInfo(42L, "Feature", "opened", "feature/x", "main",
-                        null, null, List.of(), List.of()),
-                List.of(new FileContext(
-                        "src/main/java/com/example/Foo.java",
-                        "main",
-                        0,
-                        List.of(ctxFoo, ctxBar))),
-                2,
+                null,
+                List.of(new FileContext("Auth.java", "main", 0, List.of(ctxAuth, ctxUser))),
+                1,
                 2);
 
         String uml = renderer.render(response);
 
-        assertThat(uml).startsWith("@startuml");
-        assertThat(uml).endsWith("@enduml\n");
-        assertThat(uml).contains("title \"MR !42 — Feature\"");
-        assertThat(uml).contains("package \"com.example\"");
-        assertThat(uml).contains("\"com.example.Foo\" as com_example_Foo");
-        assertThat(uml).contains("private final String name");
-        assertThat(uml).contains("public static Foo of(String a, String b)");
-        assertThat(uml).contains("com_example_Foo --|> BaseFoo");
-        assertThat(uml).contains("com_example_Foo ..|> IFoo");
-        assertThat(uml).contains("com_example_Foo ..> com_example_Bar : ref");
+        assertThat(uml).isEqualTo("""
+                @startuml
+                + class Authorization {
+                  - currentUser: ThreadLocal<User>
+                  + getCurrentUser(): User
+                  + authorize(User): void
+                  - authorize(String, String): void
+                  - checkCredentials(String, String): void
+                }
+
+                enum User {
+                  TestUser
+                  LKNeolantTenaks
+                  ESODUser
+                  Boss
+                }
+
+                Authorization --> User
+                @enduml
+                """);
+    }
+
+    @Test
+    void convertsCyrillicFieldSignature() {
+        String field = PlantUmlRenderer.PlantUmlSignatureConverter.toField(
+                "private static Отчеты_депозитариев информация_депозитариев");
+        assertThat(field).isEqualTo("- информация_депозитариев: Отчеты_депозитариев");
+    }
+
+    @Test
+    void rendersExtendsRelation() {
+        StructureNode node = new StructureNode(
+                "class",
+                "public class T6553 extends Scenario",
+                "1",
+                List.of());
+
+        ClassContext ctx = new UnchangedClassContext(
+                1, "test.credit.T6553", 0, Set.of(), "test", List.of(node));
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("T6553.java", "test", 0, List.of(ctx))),
+                0,
+                1);
+
+        String uml = renderer.render(response);
+
+        assertThat(uml).contains("+ class T6553 {");
+        assertThat(uml).contains("T6553 --|> Scenario");
     }
 
     @Test
@@ -63,18 +112,19 @@ class PlantUmlRendererTest {
 
         ContextResponse response = new ContextResponse(
                 null,
-                List.of(new FileContext("src/main/java/com/example/Changed.java", "main", 0, List.of(ctx))),
+                List.of(new FileContext("Changed.java", "main", 0, List.of(ctx))),
                 1,
                 1);
 
         String uml = renderer.render(response);
 
-        assertThat(uml).contains("public class Changed");
-        assertThat(uml).doesNotContain("public class Old");
+        assertThat(uml).contains("+ class Changed {");
+        assertThat(uml).doesNotContain("Old");
     }
 
     @Test
-    void aliasSanitizesQualifiedName() {
-        assertThat(PlantUmlRenderer.alias("com.example.Foo$Bar")).isEqualTo("com_example_Foo_Bar");
+    void simpleNameExtractsLastSegment() {
+        assertThat(PlantUmlRenderer.simpleName("test.credit.T6553")).isEqualTo("T6553");
+        assertThat(PlantUmlRenderer.simpleName("com.example.Foo$Bar")).isEqualTo("Bar");
     }
 }
