@@ -209,10 +209,30 @@ class PlantUmlRendererTest {
         assertThat(compact.lines().noneMatch(line -> line.startsWith(" "))).isTrue();
         assertThat(compact).isEqualTo("""
                 @startuml
-                + class Authorization {
-                - name: String
+                +class Authorization {
+                -name: String
                 }
                 @enduml
                 """);
+    }
+
+    @Test
+    void compactFormatTightensRelationArrows() {
+        StructureNode a = new StructureNode("class", "public class A", "1", List.of());
+        StructureNode b = new StructureNode("class", "public class B extends A", "2", List.of());
+        ClassContext ctxA = new UnchangedClassContext(1, "com.example.A", 0, Set.of(), "main", List.of(a));
+        ClassContext ctxB = new UnchangedClassContext(2, "com.example.B", 1, Set.of(1), "main", List.of(b));
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("B.java", "main", 0, List.of(ctxA, ctxB))),
+                1,
+                2);
+
+        String compact = renderer.render(response, false);
+
+        assertThat(compact).contains("B--|>A");
+        assertThat(compact).contains("A-->B");
+        assertThat(compact).doesNotContain(" --|> ").doesNotContain(" --> ");
     }
 }

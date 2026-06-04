@@ -86,7 +86,8 @@ public class PlantUmlRenderer {
     }
 
     /**
-     * {@code pretty=false}: убирает отступы и пустые строки, оставляет только значимые переносы.
+     * {@code pretty=false}: убирает отступы, пустые строки, пробел после {@code +-\~#},
+     * пробелы вокруг стрелок связей.
      */
     static String format(String uml, boolean pretty) {
         if (pretty) {
@@ -96,10 +97,26 @@ public class PlantUmlRenderer {
         for (String line : uml.split("\n")) {
             String trimmed = line.strip();
             if (!trimmed.isEmpty()) {
-                sb.append(trimmed).append('\n');
+                sb.append(compactLine(trimmed)).append('\n');
             }
         }
         return sb.toString();
+    }
+
+    private static String compactLine(String line) {
+        if (line.length() >= 2) {
+            char first = line.charAt(0);
+            if (first == '+' || first == '-' || first == '#' || first == '~') {
+                if (line.charAt(1) == ' ') {
+                    line = first + line.substring(2);
+                }
+            }
+        }
+        return line
+                .replace(" ..|> ", "..|>")
+                .replace(" --|> ", "--|>")
+                .replace(" ..> ", "..>")
+                .replace(" --> ", "-->");
     }
 
     private void renderTypeBlock(ClassContext ctx, StructureNode node, String simple, StringBuilder sb) {
