@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import ru.kalinin.context.model.*;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -214,6 +215,84 @@ class PlantUmlRendererTest {
                 }
                 @enduml
                 """);
+    }
+
+    @Test
+    void usesQualifiedNameWhenSimpleNameCollides() {
+        StructureNode fooA = new StructureNode("class", "public class Foo", "1", List.of());
+        StructureNode fooB = new StructureNode("class", "public class Foo", "1", List.of());
+        ClassContext ctxA = new UnchangedClassContext(
+                1, "com.example.Foo", 0, Set.of(), "main", List.of(fooA));
+        ClassContext ctxB = new UnchangedClassContext(
+                2, "com.other.Foo", 1, Set.of(1), "main", List.of(fooB));
+
+        Map<String, String> display = PlantUmlRenderer.buildDisplayNames(List.of(ctxA, ctxB));
+        assertThat(display).containsEntry("com.example.Foo", "com.example.Foo");
+        assertThat(display).containsEntry("com.other.Foo", "com.other.Foo");
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("Foo.java", "main", 0, List.of(ctxA, ctxB))),
+                1,
+                2);
+
+        String uml = renderer.render(response);
+
+        assertThat(uml).contains("+ class com.example.Foo {");
+        assertThat(uml).contains("+ class com.other.Foo {");
+        assertThat(uml).contains("com.example.Foo --> com.other.Foo");
+        assertThat(uml).doesNotContain("+ class Foo {");
+    }
+
+    @Test
+    void usesSimpleNameWhenUnique() {
+        ClassContext ctx = new UnchangedClassContext(
+                1, "com.example.Unique", 0, Set.of(), "main",
+                List.of(new StructureNode("class", "public class Unique", "1", List.of())));
+
+        assertThat(PlantUmlRenderer.buildDisplayNames(List.of(ctx)))
+                .containsEntry("com.example.Unique", "Unique");
+    }
+
+    @Test
+    void addsMemberStereotypesForBranchDiff() {
+        StructureNode sourceRoot = new StructureNode(
+                "class",
+                "public class Foo",
+                "1",
+                List.of(
+                        new StructureNode("field", "private String onlyInSource", "2", null),
+                        new StructureNode("method", "public void shared()", "3", null),
+                        new StructureNode("method", "public void changed(int x)", "4", null)));
+
+        StructureNode targetRoot = new StructureNode(
+                "class",
+                "public class Foo",
+                "1",
+                List.of(
+                        new StructureNode("field", "private int onlyInTarget", "5", null),
+                        new StructureNode("method", "public void shared()", "3", null),
+                        new StructureNode("method", "public void changed(String y)", "6", null)));
+
+        ClassContext ctx = new ModifiedClassContext(
+                1, "com.example.Foo", 0, Set.of(), "main",
+                List.of(sourceRoot),
+                List.of(targetRoot));
+
+        String uml = renderer.render(new ContextResponse(
+                null,
+                List.of(new FileContext("Foo.java", "main", 0, List.of(ctx))),
+                0,
+                1));
+
+        assertThat(uml).contains("- onlyInSource: String <<source only>>");
+        assertThat(uml).contains("- onlyInTarget: int <<target only>>");
+        assertThat(uml).contains("+ shared(): void");
+        assertThat(uml).doesNotContain("shared(): void <<");
+        assertThat(uml).contains("+ changed(int): void <<changed>>");
+        assertThat(uml).doesNotContain("changed(String)");
+        assertThat(uml).contains("legend right");
+        assertThat(uml).contains("<<source only>> — только в source-ветке MR");
     }
 
     @Test

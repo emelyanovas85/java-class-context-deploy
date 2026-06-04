@@ -36,6 +36,14 @@ public class PlantUmlRenderer {
     private static final Pattern ANNOTATION_INLINE =
             Pattern.compile("@\\w+(?:\\([^)]*\\))?\\s*");
 
+    private static final String STEREO_SOURCE_ONLY = " <<source only>>";
+    private static final String STEREO_TARGET_ONLY = " <<target only>>";
+    private static final String STEREO_CHANGED = " <<changed>>";
+
+    private enum MemberBranch { BOTH, SOURCE_ONLY, TARGET_ONLY, CHANGED }
+
+    private record MemberRender(StructureNode node, MemberBranch branch) {}
+
     public String render(ContextResponse response) {
         return render(response, true);
     }
@@ -50,36 +58,41 @@ public class PlantUmlRenderer {
                 .sorted(Comparator.comparingInt(ClassContext::level).thenComparingInt(ClassContext::id))
                 .toList();
 
-        Map<Integer, String> idToSimple = classes.stream()
+        Map<String, String> qNameToDisplay = buildDisplayNames(classes);
+
+        Map<Integer, String> idToDisplay = classes.stream()
                 .collect(Collectors.toMap(
                         ClassContext::id,
-                        ctx -> simpleName(ctx.name()),
+                        ctx -> qNameToDisplay.get(ctx.name()),
                         (a, b) -> a,
                         LinkedHashMap::new));
 
-        Set<String> declaredSimpleNames = new LinkedHashSet<>();
-        Map<String, String> qNameToSimple = new LinkedHashMap<>();
-        for (ClassContext ctx : classes) {
-            String simple = simpleName(ctx.name());
-            qNameToSimple.put(ctx.name(), simple);
-            declaredSimpleNames.add(simple);
-        }
+        Set<String> declaredDisplayNames = new LinkedHashSet<>(qNameToDisplay.values());
 
         StringBuilder sb = new StringBuilder();
         sb.append("@startuml\n");
 
+        boolean hasBranchStereotypes = false;
         Set<String> rendered = new LinkedHashSet<>();
         for (ClassContext ctx : classes) {
-            for (StructureNode node : structureNodes(ctx)) {
-                String simple = simpleName(ctx.name());
-                if (!rendered.add(ctx.name())) {
-                    continue;
-                }
-                renderTypeBlock(ctx, node, simple, sb);
+            StructureNode typeNode = primaryTypeNode(ctx);
+            if (typeNode == null || !rendered.add(ctx.name())) {
+                continue;
+            }
+            if (renderTypeBlock(ctx, typeNode, qNameToDisplay.get(ctx.name()), sb)) {
+                hasBranchStereotypes = true;
             }
         }
 
-        renderRelations(classes, idToSimple, qNameToSimple, declaredSimpleNames, sb);
+        if (hasBranchStereotypes) {
+            sb.append("legend right\n");
+            sb.append("  <<source only>> — только в source-ветке MR\n");
+            sb.append("  <<target only>> — только в target-ветке\n");
+            sb.append("  <<changed>> — есть в обеих, сигнатура различается\n");
+            sb.append("end legend\n\n");
+        }
+
+        renderRelations(classes, idToDisplay, qNameToDisplay, declaredDisplayNames, sb);
 
         sb.append("@enduml\n");
         return sb.toString();
@@ -119,20 +132,132 @@ public class PlantUmlRenderer {
                 .replace(" --> ", "-->");
     }
 
-    private void renderTypeBlock(ClassContext ctx, StructureNode node, String simple, StringBuilder sb) {
-        String header = PlantUmlSignatureConverter.typeHeader(node, simple);
+    /** @return {@code true}, если на диаграмме есть стереотипы веток */
+    private boolean renderTypeBlock(ClassContext ctx, StructureNode node, String displayName, StringBuilder sb) {
+        String header = PlantUmlSignatureConverter.typeHeader(node, displayName);
+        header += classBranchStereotype(ctx);
         sb.append(header).append(" {\n");
 
-        if (node.children() != null) {
-            for (StructureNode child : node.children()) {
-                String member = memberLine(child);
-                if (member != null) {
-                    sb.append("  ").append(member).append('\n');
-                }
-            }
+        boolean hasStereotypes = !classBranchStereotype(ctx).isEmpty();
+        for (MemberRender member : collectMembers(ctx, node)) {
+            String line = memberLine(member.node());
+            if (line == null) continue;
+            String stereo = memberBranchStereotype(member.branch());
+            if (!stereo.isEmpty()) hasStereotypes = true;
+            sb.append("  ").append(line).append(stereo).append('\n');
         }
 
         sb.append("}\n\n");
+        return hasStereotypes;
+    }
+
+    private static String classBranchStereotype(ClassContext ctx) {
+        if (!(ctx instanceof ModifiedClassContext m)) return "";
+        if (m.structureSource() == null) return STEREO_TARGET_ONLY;
+        if (m.structureTarget() == null) return STEREO_SOURCE_ONLY;
+        return "";
+    }
+
+    private static String memberBranchStereotype(MemberBranch branch) {
+        return switch (branch) {
+            case SOURCE_ONLY -> STEREO_SOURCE_ONLY;
+            case TARGET_ONLY -> STEREO_TARGET_ONLY;
+            case CHANGED -> STEREO_CHANGED;
+            case BOTH -> "";
+        };
+    }
+
+    private List<MemberRender> collectMembers(ClassContext ctx, StructureNode typeNode) {
+        if (ctx instanceof UnchangedClassContext) {
+            return memberChildren(typeNode).stream()
+                    .map(n -> new MemberRender(n, MemberBranch.BOTH))
+                    .toList();
+        }
+        ModifiedClassContext m = (ModifiedClassContext) ctx;
+        StructureNode srcRoot = rootOf(m.structureSource());
+        StructureNode tgtRoot = rootOf(m.structureTarget());
+
+        Map<String, StructureNode> srcByKey = indexMembers(srcRoot);
+        Map<String, StructureNode> tgtByKey = indexMembers(tgtRoot);
+
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        keys.addAll(srcByKey.keySet());
+        keys.addAll(tgtByKey.keySet());
+
+        List<MemberRender> result = new ArrayList<>();
+        for (String key : keys) {
+            StructureNode src = srcByKey.get(key);
+            StructureNode tgt = tgtByKey.get(key);
+            if (src != null && tgt == null) {
+                result.add(new MemberRender(src, MemberBranch.SOURCE_ONLY));
+            } else if (src == null && tgt != null) {
+                result.add(new MemberRender(tgt, MemberBranch.TARGET_ONLY));
+            } else if (src != null) {
+                MemberBranch branch = memberSignatureKey(src).equals(memberSignatureKey(tgt))
+                        ? MemberBranch.BOTH
+                        : MemberBranch.CHANGED;
+                result.add(new MemberRender(src, branch));
+            }
+        }
+        return result;
+    }
+
+    private static StructureNode rootOf(List<StructureNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) return null;
+        return nodes.get(0);
+    }
+
+    private static List<StructureNode> memberChildren(StructureNode typeNode) {
+        if (typeNode == null || typeNode.children() == null) return List.of();
+        return typeNode.children().stream()
+                .filter(c -> !isTypeContainer(c.type()))
+                .toList();
+    }
+
+    private static Map<String, StructureNode> indexMembers(StructureNode typeNode) {
+        Map<String, StructureNode> map = new LinkedHashMap<>();
+        for (StructureNode child : memberChildren(typeNode)) {
+            map.putIfAbsent(memberKey(child), child);
+        }
+        return map;
+    }
+
+    /** Логический ключ члена (имя поля/метода/константы), без типов параметров. */
+    static String memberKey(StructureNode node) {
+        return node.type() + "|" + memberLogicalId(node);
+    }
+
+    private static String memberSignatureKey(StructureNode node) {
+        return normalizeSignature(node.signature());
+    }
+
+    private static String memberLogicalId(StructureNode node) {
+        String sig = stripAnnotations(node.signature());
+        return switch (node.type()) {
+            case "enum_constant" -> sig.trim();
+            case "field" -> fieldLogicalId(sig);
+            case "method", "constructor" -> methodLogicalId(sig);
+            default -> normalizeSignature(node.signature());
+        };
+    }
+
+    private static String fieldLogicalId(String line) {
+        String rest = PlantUmlSignatureConverter.removeModifiersPublic(line);
+        int eq = rest.indexOf('=');
+        if (eq >= 0) rest = rest.substring(0, eq).trim();
+        int sp = rest.lastIndexOf(' ');
+        return sp < 0 ? rest : rest.substring(sp + 1).trim();
+    }
+
+    private static String methodLogicalId(String line) {
+        int paren = line.indexOf('(');
+        if (paren < 0) return normalizeSignature(line);
+        String before = line.substring(0, paren).trim();
+        return before.substring(before.lastIndexOf(' ') + 1).trim();
+    }
+
+    private static String normalizeSignature(String signature) {
+        return stripAnnotations(signature).replaceAll("\\s+", " ").trim();
     }
 
     private String memberLine(StructureNode child) {
@@ -145,21 +270,37 @@ public class PlantUmlRenderer {
         };
     }
 
+    private static StructureNode primaryTypeNode(ClassContext ctx) {
+        return switch (ctx) {
+            case UnchangedClassContext u -> rootOf(nullToEmpty(u.structure()));
+            case ModifiedClassContext m -> {
+                if (m.structureSource() != null) yield rootOf(m.structureSource());
+                if (m.structureTarget() != null) yield rootOf(m.structureTarget());
+                yield null;
+            }
+        };
+    }
+
     private void renderRelations(List<ClassContext> classes,
-                                 Map<Integer, String> idToSimple,
-                                 Map<String, String> qNameToSimple,
-                                 Set<String> declaredSimpleNames,
+                                 Map<Integer, String> idToDisplay,
+                                 Map<String, String> qNameToDisplay,
+                                 Set<String> declaredDisplayNames,
                                  StringBuilder sb) {
         Set<String> drawn = new LinkedHashSet<>();
 
         for (ClassContext ctx : classes) {
-            String from = simpleName(ctx.name());
-            for (StructureNode node : structureNodes(ctx)) {
-                appendInheritance(from, node.signature(), qNameToSimple, declaredSimpleNames, drawn, sb);
-                appendTypeReferences(from, node, qNameToSimple, declaredSimpleNames, drawn, sb);
+            String from = qNameToDisplay.get(ctx.name());
+            StructureNode primary = primaryTypeNode(ctx);
+            if (primary != null) {
+                appendInheritance(from, primary.signature(), qNameToDisplay, declaredDisplayNames, drawn, sb);
+                if (ctx instanceof ModifiedClassContext m) {
+                    appendTypeReferencesMerged(from, m, qNameToDisplay, declaredDisplayNames, drawn, sb);
+                } else {
+                    appendTypeReferences(from, primary, qNameToDisplay, declaredDisplayNames, drawn, sb);
+                }
             }
             for (Integer callerId : ctx.callerIds()) {
-                String caller = idToSimple.get(callerId);
+                String caller = idToDisplay.get(callerId);
                 if (caller == null) continue;
                 String key = caller + "-->" + from;
                 if (drawn.add(key)) {
@@ -170,32 +311,32 @@ public class PlantUmlRenderer {
     }
 
     private static void appendInheritance(String from, String signature,
-                                          Map<String, String> qNameToSimple,
-                                          Set<String> declaredSimpleNames,
+                                          Map<String, String> qNameToDisplay,
+                                          Set<String> declaredDisplayNames,
                                           Set<String> drawn, StringBuilder sb) {
         String line = lastDeclarationLine(signature);
         Matcher extendsMatcher = EXTENDS.matcher(line);
         if (extendsMatcher.find()) {
-            inheritanceLink(from, extendsMatcher.group(1).trim(), qNameToSimple, declaredSimpleNames,
+            inheritanceLink(from, extendsMatcher.group(1).trim(), qNameToDisplay, declaredDisplayNames,
                     drawn, sb, "--|>");
         }
         Matcher implementsMatcher = IMPLEMENTS.matcher(line);
         if (implementsMatcher.find()) {
             for (String iface : splitTypes(implementsMatcher.group(1))) {
-                inheritanceLink(from, iface, qNameToSimple, declaredSimpleNames, drawn, sb, "..|>");
+                inheritanceLink(from, iface, qNameToDisplay, declaredDisplayNames, drawn, sb, "..|>");
             }
         }
     }
 
     private static void inheritanceLink(String from, String typeRef,
-                                        Map<String, String> qNameToSimple,
-                                        Set<String> declaredSimpleNames,
+                                        Map<String, String> qNameToDisplay,
+                                        Set<String> declaredDisplayNames,
                                         Set<String> drawn, StringBuilder sb, String arrow) {
-        String target = simpleNameOfTypeRef(typeRef, qNameToSimple);
+        String target = displayNameOfTypeRef(typeRef, qNameToDisplay);
         if (target.isBlank() || target.equals(from)) return;
-        if (!declaredSimpleNames.contains(target)) {
+        if (!declaredDisplayNames.contains(target)) {
             sb.append("class ").append(target).append('\n');
-            declaredSimpleNames.add(target);
+            declaredDisplayNames.add(target);
         }
         String key = from + arrow + target;
         if (drawn.add(key)) {
@@ -203,14 +344,11 @@ public class PlantUmlRenderer {
         }
     }
 
-    private static String simpleNameOfTypeRef(String typeRef, Map<String, String> qNameToSimple) {
+    private static String displayNameOfTypeRef(String typeRef, Map<String, String> qNameToDisplay) {
         String normalized = typeRef.replaceAll("<[^>]*>", "").trim();
         if (normalized.isEmpty()) return "";
-        for (Map.Entry<String, String> e : qNameToSimple.entrySet()) {
-            if (e.getKey().endsWith("." + normalized) || e.getKey().equals(normalized)) {
-                return e.getValue();
-            }
-        }
+        String fromDiagram = resolveDisplayType(normalized, qNameToDisplay);
+        if (fromDiagram != null) return fromDiagram;
         if (normalized.contains(".")) {
             return normalized.substring(normalized.lastIndexOf('.') + 1);
         }
@@ -218,31 +356,47 @@ public class PlantUmlRenderer {
     }
 
     private static void appendTypeReferences(String from, StructureNode node,
-                                             Map<String, String> qNameToSimple,
-                                             Set<String> declaredSimpleNames,
+                                             Map<String, String> qNameToDisplay,
+                                             Set<String> declaredDisplayNames,
                                              Set<String> drawn, StringBuilder sb) {
-        if (node.children() == null) return;
-        for (StructureNode child : node.children()) {
-            if ("field".equals(child.type())) {
-                String type = PlantUmlSignatureConverter.extractFieldType(child.signature());
-                if (type != null && !type.isBlank()) {
-                    link(from, type, qNameToSimple, declaredSimpleNames, drawn, sb, "-->");
-                }
-            } else if ("method".equals(child.type())) {
-                PlantUmlSignatureConverter.extractReferencedTypes(child.signature())
-                        .forEach(ref -> link(from, ref, qNameToSimple, declaredSimpleNames, drawn, sb, "-->"));
-            } else if ("constructor".equals(child.type())) {
-                PlantUmlSignatureConverter.extractParameterTypes(child.signature())
-                        .forEach(ref -> link(from, ref, qNameToSimple, declaredSimpleNames, drawn, sb, "-->"));
+        for (StructureNode child : memberChildren(node)) {
+            appendTypeReferencesForMember(from, child, qNameToDisplay, declaredDisplayNames, drawn, sb);
+        }
+    }
+
+    private static void appendTypeReferencesMerged(String from, ModifiedClassContext m,
+                                                   Map<String, String> qNameToDisplay,
+                                                   Set<String> declaredDisplayNames,
+                                                   Set<String> drawn, StringBuilder sb) {
+        StructureNode src = rootOf(m.structureSource());
+        StructureNode tgt = rootOf(m.structureTarget());
+        if (src != null) appendTypeReferences(from, src, qNameToDisplay, declaredDisplayNames, drawn, sb);
+        if (tgt != null && tgt != src) appendTypeReferences(from, tgt, qNameToDisplay, declaredDisplayNames, drawn, sb);
+    }
+
+    private static void appendTypeReferencesForMember(String from, StructureNode child,
+                                                      Map<String, String> qNameToDisplay,
+                                                      Set<String> declaredDisplayNames,
+                                                      Set<String> drawn, StringBuilder sb) {
+        if ("field".equals(child.type())) {
+            String type = PlantUmlSignatureConverter.extractFieldType(child.signature());
+            if (type != null && !type.isBlank()) {
+                link(from, type, qNameToDisplay, declaredDisplayNames, drawn, sb, "-->");
             }
+        } else if ("method".equals(child.type())) {
+            PlantUmlSignatureConverter.extractReferencedTypes(child.signature())
+                    .forEach(ref -> link(from, ref, qNameToDisplay, declaredDisplayNames, drawn, sb, "-->"));
+        } else if ("constructor".equals(child.type())) {
+            PlantUmlSignatureConverter.extractParameterTypes(child.signature())
+                    .forEach(ref -> link(from, ref, qNameToDisplay, declaredDisplayNames, drawn, sb, "-->"));
         }
     }
 
     private static void link(String from, String typeRef,
-                             Map<String, String> qNameToSimple,
-                             Set<String> declaredSimpleNames,
+                             Map<String, String> qNameToDisplay,
+                             Set<String> declaredDisplayNames,
                              Set<String> drawn, StringBuilder sb, String arrow) {
-        String target = resolveSimpleType(typeRef, qNameToSimple, declaredSimpleNames);
+        String target = resolveDisplayType(typeRef, qNameToDisplay, declaredDisplayNames);
         if (target == null || target.equals(from)) return;
         String key = from + arrow + target;
         if (drawn.add(key)) {
@@ -250,22 +404,56 @@ public class PlantUmlRenderer {
         }
     }
 
-    private static String resolveSimpleType(String typeRef,
-                                            Map<String, String> qNameToSimple,
-                                            Set<String> declaredSimpleNames) {
+    private static String resolveDisplayType(String typeRef,
+                                             Map<String, String> qNameToDisplay,
+                                             Set<String> declaredDisplayNames) {
         String normalized = typeRef.replaceAll("<[^>]*>", "").trim();
         if (normalized.isEmpty()) return null;
-        if (normalized.contains(".")) {
-            String simple = normalized.substring(normalized.lastIndexOf('.') + 1);
-            if (declaredSimpleNames.contains(simple)) return simple;
+        String fromDiagram = resolveDisplayType(normalized, qNameToDisplay);
+        if (fromDiagram != null) return fromDiagram;
+        String simple = normalized.contains(".")
+                ? normalized.substring(normalized.lastIndexOf('.') + 1)
+                : normalized;
+        return declaredDisplayNames.contains(simple) ? simple : null;
+    }
+
+    /** Ищет тип среди классов диаграммы; при единственном совпадении возвращает display name. */
+    private static String resolveDisplayType(String normalized, Map<String, String> qNameToDisplay) {
+        if (qNameToDisplay.containsKey(normalized)) {
+            return qNameToDisplay.get(normalized);
         }
-        if (declaredSimpleNames.contains(normalized)) return normalized;
-        for (Map.Entry<String, String> e : qNameToSimple.entrySet()) {
-            if (e.getKey().endsWith("." + normalized) || e.getKey().equals(normalized)) {
-                return e.getValue();
+        List<String> matches = new ArrayList<>();
+        for (Map.Entry<String, String> e : qNameToDisplay.entrySet()) {
+            if (e.getKey().endsWith("." + normalized)) {
+                matches.add(e.getValue());
             }
         }
-        return declaredSimpleNames.contains(normalized) ? normalized : null;
+        if (matches.size() == 1) {
+            return matches.get(0);
+        }
+        return null;
+    }
+
+    /**
+     * qualified name → имя на диаграмме: simple name, если он уникален среди классов ответа,
+     * иначе полный qualified name.
+     */
+    static Map<String, String> buildDisplayNames(List<ClassContext> classes) {
+        Map<String, Long> simpleCounts = classes.stream()
+                .collect(Collectors.groupingBy(ctx -> simpleName(ctx.name()), Collectors.counting()));
+
+        Set<String> ambiguousSimple = simpleCounts.entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        Map<String, String> result = new LinkedHashMap<>();
+        for (ClassContext ctx : classes) {
+            String qName = ctx.name();
+            String simple = simpleName(qName);
+            result.put(qName, ambiguousSimple.contains(simple) ? qName : simple);
+        }
+        return result;
     }
 
     private static List<String> splitTypes(String list) {
@@ -288,19 +476,13 @@ public class PlantUmlRenderer {
         return result;
     }
 
-    private static List<StructureNode> structureNodes(ClassContext ctx) {
-        return switch (ctx) {
-            case UnchangedClassContext u -> nullToEmpty(u.structure());
-            case ModifiedClassContext m -> {
-                if (m.structureSource() != null) yield m.structureSource();
-                if (m.structureTarget() != null) yield m.structureTarget();
-                yield List.of();
-            }
-        };
-    }
-
     private static List<StructureNode> nullToEmpty(List<StructureNode> nodes) {
         return nodes != null ? nodes : List.of();
+    }
+
+    private static boolean isTypeContainer(String type) {
+        return "class".equals(type) || "interface".equals(type) || "enum".equals(type)
+                || "record".equals(type) || "annotation".equals(type);
     }
 
     static String simpleName(String qualifiedName) {
@@ -538,6 +720,10 @@ public class PlantUmlRenderer {
         }
 
         private static String removeModifiers(String line) {
+            return removeModifiersPublic(line);
+        }
+
+        static String removeModifiersPublic(String line) {
             String result = line;
             for (String mod : MODIFIERS) {
                 result = result.replaceAll("\\b" + mod + "\\b\\s*", "");
