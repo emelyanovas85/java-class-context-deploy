@@ -37,6 +37,14 @@ public class PlantUmlRenderer {
             Pattern.compile("@\\w+(?:\\([^)]*\\))?\\s*");
 
     public String render(ContextResponse response) {
+        return render(response, true);
+    }
+
+    public String render(ContextResponse response, boolean pretty) {
+        return format(renderDiagram(response), pretty);
+    }
+
+    private String renderDiagram(ContextResponse response) {
         List<ClassContext> classes = response.files().stream()
                 .flatMap(f -> f.classes().stream())
                 .sorted(Comparator.comparingInt(ClassContext::level).thenComparingInt(ClassContext::id))
@@ -74,6 +82,23 @@ public class PlantUmlRenderer {
         renderRelations(classes, idToSimple, qNameToSimple, declaredSimpleNames, sb);
 
         sb.append("@enduml\n");
+        return sb.toString();
+    }
+
+    /**
+     * {@code pretty=false}: убирает отступы и пустые строки, оставляет только значимые переносы.
+     */
+    static String format(String uml, boolean pretty) {
+        if (pretty) {
+            return uml;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String line : uml.split("\n")) {
+            String trimmed = line.strip();
+            if (!trimmed.isEmpty()) {
+                sb.append(trimmed).append('\n');
+            }
+        }
         return sb.toString();
     }
 

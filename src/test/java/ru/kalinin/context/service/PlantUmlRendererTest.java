@@ -182,4 +182,37 @@ class PlantUmlRendererTest {
 
         assertThat(renderer.render(response)).contains("@startuml").contains("@enduml");
     }
+
+    @Test
+    void compactFormatRemovesIndentAndBlankLines() {
+        StructureNode authorization = new StructureNode(
+                "class",
+                "public class Authorization",
+                "1",
+                List.of(new StructureNode("field", "private String name", "2", null)));
+
+        ClassContext ctx = new UnchangedClassContext(
+                1, "com.example.Authorization", 0, Set.of(), "main", List.of(authorization));
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("A.java", "main", 0, List.of(ctx))),
+                0,
+                1);
+
+        String pretty = renderer.render(response, true);
+        String compact = renderer.render(response, false);
+
+        assertThat(pretty).contains("  - name");
+        assertThat(pretty).contains("\n\n");
+        assertThat(compact).doesNotContain("\n\n");
+        assertThat(compact.lines().noneMatch(line -> line.startsWith(" "))).isTrue();
+        assertThat(compact).isEqualTo("""
+                @startuml
+                + class Authorization {
+                - name: String
+                }
+                @enduml
+                """);
+    }
 }

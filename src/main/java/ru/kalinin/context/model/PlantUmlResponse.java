@@ -7,6 +7,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
  *
  * @param mergeRequest         метаданные мёрж-реквеста
  * @param plantUml             текст диаграммы PlantUML (class diagram)
+ * @param pretty               {@code true} — с отступами, {@code false} — компактный вывод
  * @param requestedDepth       запрошенная глубина контекста
  * @param totalClassesAnalyzed количество классов на диаграмме
  */
@@ -14,6 +15,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 public record PlantUmlResponse(
         MergeRequestInfo mergeRequest,
         String plantUml,
+        boolean pretty,
         int requestedDepth,
         int totalClassesAnalyzed
 ) {}

@@ -16,6 +16,7 @@ import ru.kalinin.context.model.ContextRequest;
 import ru.kalinin.context.model.ContextResponse;
 import ru.kalinin.context.model.GitLabLinesRequest;
 import ru.kalinin.context.model.JarLinesRequest;
+import ru.kalinin.context.model.PlantUmlRequest;
 import ru.kalinin.context.model.PlantUmlResponse;
 import ru.kalinin.context.model.SourceLinesResponse;
 import ru.kalinin.context.service.ContextBuilderService;
@@ -108,9 +109,9 @@ public class ContextController {
     @Operation(
             summary = "Построить PlantUML class diagram",
             description = """
-                    Те же параметры, что у POST /api/context. Строит контекст классов MR
-                    и возвращает текст диаграммы PlantUML: типы с полями и методами,
-                    наследование/реализацию и зависимости по callerIds.
+                    Параметры MR в поле `context` (как у POST /api/context) и опционально `pretty`.
+                    Строит контекст классов MR и возвращает PlantUML class diagram.
+                    `pretty=true` (по умолчанию) — с отступами; `pretty=false` — компактный текст.
                     """
     )
     @ApiResponses({
@@ -125,15 +126,18 @@ public class ContextController {
                     content = @Content(schema = @Schema()))
     })
     @PostMapping("/plantuml")
-    public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody ContextRequest request) {
-        log.info("Building PlantUML for MR !{} in project '{}', depth={}",
-                request.mergeRequestIid(), request.projectId(), request.depth());
+    public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody PlantUmlRequest request) {
+        ContextRequest ctx = request.context();
+        boolean pretty = request.prettyOrDefault();
+        log.info("Building PlantUML for MR !{} in project '{}', depth={}, pretty={}",
+                ctx.mergeRequestIid(), ctx.projectId(), ctx.depth(), pretty);
         Instant start = Instant.now();
-        ContextResponse context = contextBuilderService.buildContext(request);
-        String plantUml = plantUmlRenderer.render(context);
+        ContextResponse context = contextBuilderService.buildContext(ctx);
+        String plantUml = plantUmlRenderer.render(context, pretty);
         PlantUmlResponse response = new PlantUmlResponse(
                 context.mergeRequest(),
                 plantUml,
+                pretty,
                 context.requestedDepth(),
                 context.totalClassesAnalyzed());
         log.info("PlantUML built: {} classes   {} ms",
@@ -145,7 +149,7 @@ public class ContextController {
             summary = "Построить PlantUML (plain text)",
             description = """
                     Те же параметры, что у POST /api/plantuml. Возвращает только текст
-                    диаграммы (Content-Type: text/plain) для вставки в редактор PlantUML.
+                    диаграммы (Content-Type: text/plain).
                     """
     )
     @ApiResponses({
@@ -156,14 +160,16 @@ public class ContextController {
                     content = @Content(schema = @Schema()))
     })
     @PostMapping(value = "/plantuml/text", produces = MediaType.TEXT_PLAIN_VALUE)
-    public ResponseEntity<String> getPlantUmlText(@Valid @RequestBody ContextRequest request) {
-        log.info("Building PlantUML text for MR !{} in project '{}', depth={}",
-                request.mergeRequestIid(), request.projectId(), request.depth());
+    public ResponseEntity<String> getPlantUmlText(@Valid @RequestBody PlantUmlRequest request) {
+        ContextRequest ctx = request.context();
+        boolean pretty = request.prettyOrDefault();
+        log.info("Building PlantUML text for MR !{} in project '{}', depth={}, pretty={}",
+                ctx.mergeRequestIid(), ctx.projectId(), ctx.depth(), pretty);
         Instant start = Instant.now();
-        ContextResponse context = contextBuilderService.buildContext(request);
-        String plantUml = plantUmlRenderer.render(context);
+        ContextResponse context = contextBuilderService.buildContext(ctx);
+        String plantUml = plantUmlRenderer.render(context, pretty);
         log.info("PlantUML text built for MR !{} ({} classes)   {} ms",
-                request.mergeRequestIid(), context.totalClassesAnalyzed(),
+                ctx.mergeRequestIid(), context.totalClassesAnalyzed(),
                 Duration.between(start, Instant.now()).toMillis());
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_PLAIN)
