@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: java-context-service
+    name: java-structure-service
   jackson:
     serialization:
       indent-output: true
@@ -14,13 +14,13 @@ app:
   parse-cache:
     enabled: true
     dir: artifacts
-    expire-after-access-minutes: 5
+    expire-after-access-minutes: 10
   review-session:
-    ttl-minutes: 120
+    ttl-minutes: 60
     uid-length: 8
     diff-refs-retry-attempts: 3
     diff-refs-retry-delay-ms: 500
 
 logging:
   level:
-    ru.kalinin.context: DEBUG
+    service.structure.context: DEBUG
