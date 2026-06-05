@@ -211,10 +211,46 @@ class PlantUmlRendererTest {
         assertThat(compact).isEqualTo("""
                 @startuml
                 +class Authorization {
-                -name: String
+                -name:String
                 }
                 @enduml
                 """);
+    }
+
+    @Test
+    void typeHeaderUsesSupportedPlantUmlKeywords() {
+        assertThat(PlantUmlRenderer.PlantUmlSignatureConverter.typeHeader(
+                new StructureNode("record", "public record Point(int x, int y)", "1", null), "Point"))
+                .isEqualTo("+ record Point");
+        assertThat(PlantUmlRenderer.PlantUmlSignatureConverter.typeHeader(
+                new StructureNode("annotation", "public @interface Nullable", "1", null), "Nullable"))
+                .isEqualTo("+ annotation Nullable");
+        assertThat(PlantUmlRenderer.PlantUmlSignatureConverter.typeHeader(
+                new StructureNode("class", "public abstract class Base", "1", null), "Base"))
+                .isEqualTo("+ abstract class Base");
+    }
+
+    @Test
+    void compactFormatRemovesSpacesBetweenMethodParameters() {
+        StructureNode node = new StructureNode(
+                "class",
+                "public class Foo",
+                "1",
+                List.of(new StructureNode("method", "public void bar(String a, Integer b)", "2", null)));
+
+        ClassContext ctx = new UnchangedClassContext(
+                1, "com.example.Foo", 0, Set.of(), "main", List.of(node));
+
+        ContextResponse response = new ContextResponse(
+                null,
+                List.of(new FileContext("Foo.java", "main", 0, List.of(ctx))),
+                0,
+                1);
+
+        String compact = renderer.render(response, false);
+
+        assertThat(compact).contains("+bar(String,Integer):void");
+        assertThat(compact).doesNotContain("String, Integer");
     }
 
     @Test

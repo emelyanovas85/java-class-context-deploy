@@ -12,8 +12,6 @@ import service.structure.exception.MergeRequestAlreadyMergedException;
 import service.structure.exception.ReviewSessionIndexBuildException;
 import service.structure.exception.ReviewSessionNotFoundException;
 import service.structure.exception.ReviewSessionTerminatedException;
-import service.structure.exception.SeedFilesNotFoundException;
-
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -57,15 +55,6 @@ public class GlobalExceptionHandler {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.GONE, ex.getMessage());
         pd.setTitle("Review session terminated");
         pd.setProperty("code", "SESSION_TERMINATED");
-        return pd;
-    }
-
-    @ExceptionHandler(SeedFilesNotFoundException.class)
-    public ProblemDetail handleSeedFilesNotFound(SeedFilesNotFoundException ex) {
-        log.warn(ex.getMessage());
-        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
-        pd.setTitle("Seed files not found");
-        pd.setProperty("names", ex.names());
         return pd;
     }
 

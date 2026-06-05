@@ -31,7 +31,7 @@ public record PlantUmlSessionRequest(
         @Min(value = 0, message = "depth must be >= 0")
         int depth,
 
-        @Schema(description = "Корни обхода (см. SessionRequest)", nullable = true)
+        @Schema(description = "Корни обхода (см. SessionRequest); ненайденные — пропуск", nullable = true)
         List<@NotBlank(message = "name must not be blank") String> names,
 
         @Schema(description = "true — читаемые отступы в PlantUML; false — компактный вывод. По умолчанию true", example = "true")

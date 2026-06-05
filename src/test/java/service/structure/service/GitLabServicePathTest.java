@@ -5,13 +5,11 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import service.structure.exception.SeedFilesNotFoundException;
 import service.structure.model.StructureSeed;
 
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class GitLabServicePathTest {
 
@@ -87,12 +85,13 @@ class GitLabServicePathTest {
     }
 
     @Test
-    void resolveStructureSeeds_unknown_throws() {
-        assertThatThrownBy(() -> new GitLabService(null).resolveStructureSeeds(
+    void resolveStructureSeeds_unknown_returnsEmpty() {
+        List<StructureSeed> seeds = new GitLabService(null).resolveStructureSeeds(
                 Map.of("Foo.java", List.of("src/main/java/a/Foo.java")),
                 Map.of(),
-                List.of("Missing")))
-                .isInstanceOf(SeedFilesNotFoundException.class);
+                List.of("Missing"));
+
+        assertThat(seeds).isEmpty();
     }
 
     @Test

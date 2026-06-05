@@ -126,6 +126,8 @@ public class PlantUmlRenderer {
             }
         }
         return line
+                .replace(", ", ",")
+                .replace(": ", ":")
                 .replace(" ..|> ", "..|>")
                 .replace(" --|> ", "--|>")
                 .replace(" ..> ", "..>")
@@ -486,8 +488,11 @@ public class PlantUmlRenderer {
     }
 
     private static boolean isTypeContainer(String type) {
-        return "class".equals(type) || "interface".equals(type) || "enum".equals(type)
-                || "record".equals(type) || "annotation".equals(type);
+        return switch (type) {
+            case "class", "interface", "enum", "record", "annotation", "abstract", "abstract_class",
+                    "struct", "entity", "exception", "protocol", "metaclass", "stereotype", "dataclass" -> true;
+            default -> false;
+        };
     }
 
     static String simpleName(String qualifiedName) {
@@ -522,13 +527,51 @@ public class PlantUmlRenderer {
 
         static String typeHeader(StructureNode node, String simpleName) {
             String line = stripAnnotations(lastDeclarationLine(node.signature()));
-            char visibility = visibilityChar(extractModifiersList(line));
-            return switch (node.type()) {
-                case "enum" -> "enum " + simpleName;
-                case "interface" -> prefix(visibility) + "interface " + simpleName;
-                case "record" -> prefix(visibility) + "class " + simpleName;
-                case "annotation" -> prefix(visibility) + "class " + simpleName;
-                default -> prefix(visibility) + "class " + simpleName;
+            List<String> mods = extractModifiersList(line);
+            char visibility = visibilityChar(mods);
+            String vis = prefix(visibility);
+            boolean isAbstract = mods.contains("abstract");
+
+            return switch (plantUmlTypeKind(node.type(), isAbstract)) {
+                case ABSTRACT_CLASS -> vis + "abstract class " + simpleName;
+                case ABSTRACT -> vis + "abstract " + simpleName;
+                case INTERFACE -> vis + "interface " + simpleName;
+                case ANNOTATION -> vis + "annotation " + simpleName;
+                case ENUM -> "enum " + simpleName;
+                case RECORD -> vis + "record " + simpleName;
+                case STRUCT -> vis + "struct " + simpleName;
+                case ENTITY -> vis + "entity " + simpleName;
+                case EXCEPTION -> vis + "exception " + simpleName;
+                case PROTOCOL -> vis + "protocol " + simpleName;
+                case METACLASS -> vis + "metaclass " + simpleName;
+                case STEREOTYPE -> vis + "stereotype " + simpleName;
+                case DATACLASS -> vis + "dataclass " + simpleName;
+                case CLASS -> vis + "class " + simpleName;
+            };
+        }
+
+        private enum PlantUmlTypeKind {
+            ABSTRACT_CLASS, ABSTRACT, CLASS, INTERFACE, ANNOTATION, ENUM, RECORD,
+            STRUCT, ENTITY, EXCEPTION, PROTOCOL, METACLASS, STEREOTYPE, DATACLASS
+        }
+
+        private static PlantUmlTypeKind plantUmlTypeKind(String nodeType, boolean isAbstract) {
+            return switch (nodeType) {
+                case "enum" -> PlantUmlTypeKind.ENUM;
+                case "interface" -> isAbstract ? PlantUmlTypeKind.ABSTRACT : PlantUmlTypeKind.INTERFACE;
+                case "record" -> PlantUmlTypeKind.RECORD;
+                case "annotation" -> PlantUmlTypeKind.ANNOTATION;
+                case "struct" -> PlantUmlTypeKind.STRUCT;
+                case "entity" -> PlantUmlTypeKind.ENTITY;
+                case "exception" -> PlantUmlTypeKind.EXCEPTION;
+                case "protocol" -> PlantUmlTypeKind.PROTOCOL;
+                case "metaclass" -> PlantUmlTypeKind.METACLASS;
+                case "stereotype" -> PlantUmlTypeKind.STEREOTYPE;
+                case "dataclass" -> PlantUmlTypeKind.DATACLASS;
+                case "abstract" -> PlantUmlTypeKind.ABSTRACT;
+                case "abstract_class" -> PlantUmlTypeKind.ABSTRACT_CLASS;
+                case "class" -> isAbstract ? PlantUmlTypeKind.ABSTRACT_CLASS : PlantUmlTypeKind.CLASS;
+                default -> isAbstract ? PlantUmlTypeKind.ABSTRACT_CLASS : PlantUmlTypeKind.CLASS;
             };
         }
 

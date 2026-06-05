@@ -13,7 +13,6 @@ import org.gitlab4j.api.models.TreeItem;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import service.structure.exception.DiffRefsNotReadyException;
-import service.structure.exception.SeedFilesNotFoundException;
 import service.structure.model.CommitInfo;
 import service.structure.model.MergeRequestInfo;
 import service.structure.model.PinnedRefs;
@@ -255,8 +254,7 @@ public class GitLabService {
 
     /**
      * Резолвит имена в корни обхода: сначала repo-индекс, затем dependencySources.
-     *
-     * @throws SeedFilesNotFoundException если имя не найдено ни в индексе, ни в jar
+     * Ненайденные имена пропускаются (пустой вклад в level 0), без ошибки.
      */
     public List<StructureSeed> resolveStructureSeeds(Map<String, List<String>> fileIndex,
                                                      Map<String, Path> dependencySources,
@@ -276,10 +274,7 @@ public class GitLabService {
             }
         }
         if (!notFound.isEmpty()) {
-            throw new SeedFilesNotFoundException(notFound);
-        }
-        if (seeds.isEmpty()) {
-            throw new SeedFilesNotFoundException(names);
+            log.warn("Structure seeds not found (skipped): {}", notFound);
         }
         return List.copyOf(seeds);
     }
