@@ -1,6 +1,6 @@
-# java-context-service
+# java-structure-service
 
-Веб-сервис на Java 21 + Spring Boot для построения структурного контекста Java-классов по GitLab Merge Request с **сессией ревью** и pin коммитов source/target.
+Веб-сервис на Java 17 + Spring Boot для построения структурного контекста Java-классов по GitLab Merge Request с **сессией ревью** и pin коммитов source/target.
 
 ---
 
