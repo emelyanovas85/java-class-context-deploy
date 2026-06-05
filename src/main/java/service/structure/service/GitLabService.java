@@ -6,7 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.gitlab4j.api.GitLabApi;
 import org.gitlab4j.api.GitLabApiException;
 import org.gitlab4j.api.models.Diff;
-import org.gitlab4j.api.models.DiffRefs;
+import org.gitlab4j.api.models.DiffRef;
 import org.gitlab4j.api.models.MergeRequest;
 import org.gitlab4j.api.models.RepositoryFile;
 import org.gitlab4j.api.models.TreeItem;
@@ -50,7 +50,7 @@ public class GitLabService {
                                                         String projectId, long mrIid) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             MergeRequest mr = fetchMergeRequestWithDiffRefs(api, projectId, mrIid);
-            DiffRefs refs = mr.getDiffRefs();
+            DiffRef refs = mr.getDiffRefs();
             if (refs == null
                     || refs.getHeadSha() == null
                     || refs.getStartSha() == null
@@ -106,7 +106,7 @@ public class GitLabService {
         GitLabApiException last = null;
         for (int attempt = 1; attempt <= diffRefsRetryAttempts; attempt++) {
             MergeRequest mr = api.getMergeRequestApi().getMergeRequest(projectId, mrIid);
-            DiffRefs refs = mr.getDiffRefs();
+            DiffRef refs = mr.getDiffRefs();
             if (refs != null
                     && refs.getHeadSha() != null
                     && refs.getStartSha() != null
