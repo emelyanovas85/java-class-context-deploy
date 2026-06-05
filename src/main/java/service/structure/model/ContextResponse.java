@@ -5,7 +5,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.List;
 
 /**
- * Ответ эндпоинта POST /api/context.
+ * Ответ эндпоинта POST /api/structure/json.
  */
 @Schema(description = "Структурный контекст MR: классы сгруппированы по файлам, source vs target")
 public record ContextResponse(

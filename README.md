@@ -21,9 +21,9 @@
 1. POST /api/review-sessions  { gitlabUrl, projectId, token, mergeRequestIid }
    → sessionId, sourceSha, targetSha, expiresAt
 
-2. POST /api/context          { "sessionId": "…", "depth": 0 }           // все изменённые файлы
-   POST /api/context          { "sessionId": "…", "depth": 2, "names": ["com.example.Foo"] }
-   POST /api/context/markdown  { "sessionId": "…", "depth": 2, "names": ["BarService"] }
+2. POST /api/structure/json      { "sessionId": "…", "depth": 0 }
+   POST /api/structure/json      { "sessionId": "…", "depth": 2, "names": ["com.example.Foo"] }
+   POST /api/structure/markdown  { "sessionId": "…", "depth": 2, "names": ["BarService"] }
    POST /api/source-file       { "sessionId": "…", "names": ["com.example.Foo"] }
    …
 
@@ -128,11 +128,11 @@
 
 | Метод | Путь | Тело | Ответ |
 |-------|------|------|-------|
-| POST | `/api/context` | `{ "sessionId", "depth", "names"? }` | `ContextResponse` |
-| POST | `/api/context/html` | то же | HTML |
-| POST | `/api/context/markdown` | то же | `List<String>` — `FileContext.toString()` на файл |
-| POST | `/api/plantuml` | `{ "sessionId", "depth", "names"?, "pretty": true }` | `PlantUmlResponse` |
-| POST | `/api/plantuml/text` | то же | `text/plain` |
+| POST | `/api/structure/json` | `{ "sessionId", "depth", "names"? }` | `ContextResponse` |
+| POST | `/api/structure/html` | то же | HTML |
+| POST | `/api/structure/markdown` | то же | `List<String>` — `FileContext.toString()` на файл |
+| POST | `/api/structure/plantuml/object` | `{ "sessionId", "depth", "names"?, "pretty": true }` | `PlantUmlResponse` |
+| POST | `/api/structure/plantuml/text` | то же | `text/plain` |
 
 ---
 
@@ -231,7 +231,7 @@ src/main/java/service/structure/
 | Тест | Покрытие |
 |------|----------|
 | `ReviewSessionCancellationTest` | terminate + cancel futures |
-| `ContextMarkdownFormatterTest` | `/api/context/markdown` |
+| `ContextMarkdownFormatterTest` | `/api/structure/markdown` |
 | `GitLabServicePathTest` | findAllJavaPathsByName |
 | `FileSourceServiceTest` | resolve по index |
 | + существующие parser/context тесты |

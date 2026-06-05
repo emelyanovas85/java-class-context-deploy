@@ -6,7 +6,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Состояние кэша на время одного запроса {@code /api/context}.
+ * Состояние кэша на время одного запроса structure API.
  */
 public final class ParseCacheRequestScope implements AutoCloseable {
 

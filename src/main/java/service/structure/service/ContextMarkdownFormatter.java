@@ -5,7 +5,7 @@ import service.structure.model.FileContext;
 
 import java.util.List;
 
-/** Форматирование {@link ContextResponse} для {@code POST /api/context/markdown}. */
+/** Форматирование {@link ContextResponse} для {@code POST /api/structure/markdown}. */
 public final class ContextMarkdownFormatter {
 
     private ContextMarkdownFormatter() {}

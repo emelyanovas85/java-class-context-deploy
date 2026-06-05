@@ -3,7 +3,7 @@ package service.structure.model;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 /**
- * Ответ эндпоинта POST /api/plantuml.
+ * Ответ эндпоинта POST /api/structure/plantuml/object.
  *
  * @param mergeRequest         метаданные мёрж-реквеста
  * @param plantUml             текст диаграммы PlantUML (class diagram)

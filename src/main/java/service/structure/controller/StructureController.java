@@ -24,7 +24,7 @@ import java.util.List;
 
 @Slf4j
 @RestController
-@RequestMapping("/api")
+@RequestMapping("/api/structure")
 @RequiredArgsConstructor
 @Tag(name = "Structure", description = """
         Построение структурного контекста Java-классов по сессии.
@@ -67,7 +67,7 @@ public class StructureController {
             @ApiResponse(responseCode = "400", description = "Ошибка валидации тела запроса"),
             @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
-    @PostMapping("/context")
+    @PostMapping("/json")
     public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
         log.info("Building context for session {}, depth={}, seeds={}",
@@ -84,7 +84,7 @@ public class StructureController {
     @Operation(
             summary = "Построить контекст (HTML)",
             description = """
-                    То же, что `/api/context`, но ответ — HTML-страница для отладки и визуального просмотра
+                    То же, что `/api/structure/json`, но ответ — HTML-страница для отладки и визуального просмотра
                     деревьев структур. Параметры запроса идентичны JSON-версии.
 
                     """ + SESSION_REQUEST_HELP)
@@ -95,7 +95,7 @@ public class StructureController {
             @ApiResponse(responseCode = "400", description = "Ошибка валидации"),
             @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
-    @PostMapping(value = "/context/html", produces = MediaType.TEXT_HTML_VALUE)
+    @PostMapping(value = "/html", produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> getContextHtml(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
         Instant start = Instant.now();
@@ -111,7 +111,7 @@ public class StructureController {
     @Operation(
             summary = "Построить контекст (markdown)",
             description = """
-                    То же, что `/api/context`, но ответ — JSON-массив строк: по одному `FileContext.toString()`
+                    То же, что `/api/structure/json`, но ответ — JSON-массив строк: по одному `FileContext.toString()`
                     на каждый файл. Удобно для передачи в LLM без парсинга дерева JSON.
 
                     """ + SESSION_REQUEST_HELP)
@@ -122,7 +122,7 @@ public class StructureController {
             @ApiResponse(responseCode = "400", description = "Ошибка валидации"),
             @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
-    @PostMapping("/context/markdown")
+    @PostMapping("/markdown")
     public ResponseEntity<List<String>> getContextMarkdown(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
         ContextResponse response = contextBuilderService.buildContext(
@@ -132,14 +132,14 @@ public class StructureController {
 
     private static final String PLANTUML_REQUEST_HELP = """
             Тело запроса — `PlantUmlSessionRequest`:
-            - `sessionId`, `depth`, `names` — как в `/api/context`
+            - `sessionId`, `depth`, `names` — как в `/api/structure/json`
             - `pretty` — форматирование диаграммы (`true` по умолчанию)
             """;
 
     @Operation(
             summary = "Построить PlantUML class diagram (JSON)",
             description = """
-                    Строит контекст (как `/api/context`), рендерит PlantUML class diagram.
+                    Строит контекст (как `/api/structure/json`), рендерит PlantUML class diagram.
                     Ответ: `plantUml` (текст диаграммы) + метаданные MR и счётчики.
 
                     """ + PLANTUML_REQUEST_HELP)
@@ -150,7 +150,7 @@ public class StructureController {
             @ApiResponse(responseCode = "400", description = "Ошибка валидации"),
             @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
-    @PostMapping("/plantuml")
+    @PostMapping("/plantuml/object")
     public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody PlantUmlSessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
         boolean pretty = request.prettyOrDefault();
@@ -169,7 +169,7 @@ public class StructureController {
     @Operation(
             summary = "Построить PlantUML (plain text)",
             description = """
-                    Аналог `/api/plantuml`, но тело ответа — только текст PlantUML (`text/plain`),
+                    Аналог `/api/structure/plantuml/object`, но тело ответа — только текст PlantUML (`text/plain`),
                     без JSON-обёртки. Удобно для копирования в plantuml.com или рендерер.
 
                     """ + PLANTUML_REQUEST_HELP)
