@@ -7,7 +7,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import service.structure.exception.MergeRequestAlreadyMergedException;
 import service.structure.exception.ReviewSessionNotFoundException;
-import service.structure.model.ContextRequest;
+import service.structure.model.CreateSessionRequest;
 import service.structure.model.CreateSessionResponse;
 import service.structure.model.PinnedRefs;
 import service.structure.service.DependencyContextService;
@@ -50,7 +50,7 @@ public class ReviewSessionService {
      * Создаёт сессию с pin SHA и merged index.
      * Повторный вызов для того же MR терминирует предыдущую сессию.
      */
-    public CreateSessionResponse create(ContextRequest request) {
+    public CreateSessionResponse create(CreateSessionRequest request) {
         MergeRequestSnapshot snapshot = gitLabService.getMergeRequestSnapshot(
                 request.gitlabUrl(), request.token(),
                 request.projectId(), request.mergeRequestIid());
@@ -82,7 +82,6 @@ public class ReviewSessionService {
                 request.projectId(),
                 request.token(),
                 request.mergeRequestIid(),
-                request.depth(),
                 pinned,
                 snapshot.mrInfo(),
                 snapshot.mrInfo().diffs(),
@@ -131,16 +130,27 @@ public class ReviewSessionService {
         return session;
     }
 
-    /** Собирает dependencySources один раз и кэширует в сессии (при {@code depth > 0}). */
+    /** Собирает dependencySources для поиска в jar (например, {@code /api/source-file}). */
     public Map<String, Path> getOrBuildDependencySources(ReviewSession session) {
+        return buildDependencySourcesIfNeeded(session);
+    }
+
+    /** Собирает dependencySources для построения контекста; при {@code depth == 0} — только кэш. */
+    public Map<String, Path> getOrBuildDependencySources(ReviewSession session, int depth) {
+        if (depth == 0) {
+            Map<String, Path> cached = session.dependencySourcesOrNull();
+            return cached != null ? cached : Map.of();
+        }
+        return buildDependencySourcesIfNeeded(session);
+    }
+
+    private Map<String, Path> buildDependencySourcesIfNeeded(ReviewSession session) {
         Map<String, Path> cached = session.dependencySourcesOrNull();
         if (cached != null) {
             return cached;
         }
-        if (session.depth() == 0) {
-            session.setDependencySources(Map.of());
-            return Map.of();
-        }
+        log.info("Loading dependencySources for session {} (first request with depth > 0 or source-file)",
+                session.sessionId());
         Map<String, Path> built = dependencyContextService.collectDependencySources(
                 session.gitlabUrl(), session.token(), session.projectId(),
                 session.sourceSha(), session.mergedFileIndex());

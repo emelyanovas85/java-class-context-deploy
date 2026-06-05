@@ -18,12 +18,13 @@
 ### Типичный flow клиента
 
 ```text
-1. POST /api/review-sessions  { gitlabUrl, projectId, token, mergeRequestIid, depth }
+1. POST /api/review-sessions  { gitlabUrl, projectId, token, mergeRequestIid }
    → sessionId, sourceSha, targetSha, expiresAt
 
-2. POST /api/context          { "sessionId": "…" }
-   POST /api/context/markdown  { "sessionId": "…" }
-   POST /api/source-file       { "sessionId": "…", "name": "com.example.Foo" }
+2. POST /api/context          { "sessionId": "…", "depth": 0 }           // все изменённые файлы
+   POST /api/context          { "sessionId": "…", "depth": 2, "names": ["com.example.Foo"] }
+   POST /api/context/markdown  { "sessionId": "…", "depth": 2, "names": ["BarService"] }
+   POST /api/source-file       { "sessionId": "…", "names": ["com.example.Foo"] }
    …
 
 3. DELETE /api/review-sessions { "sessionId": "…" }
@@ -85,8 +86,7 @@
   "gitlabUrl": "https://gitlab.com",
   "projectId": "mygroup/myproject",
   "token": "glpat-xxxxxxxxxxxx",
-  "mergeRequestIid": 42,
-  "depth": 2
+  "mergeRequestIid": 42
 }
 ```
 
@@ -112,14 +112,26 @@
 
 ### Структуры и UML (`StructureController`)
 
-Все эндпоинты принимают `sessionId` в теле. `depth` зафиксирован при create.
+Все эндпоинты принимают `sessionId` и `depth`. Опционально `names` — корни обхода (simple/qualified/repo-путь `.java`); без `names` — все изменённые файлы MR.
+
+Резолв `names`: сначала **repo-индекс**, затем **dependencySources** (sources.jar). Можно строить структуру от класса только из зависимости, в т.ч. при `depth=0`.
+
+`dependencySources` загружаются **лениво** при `depth > 0`, при `names` вне repo-индекса или `/api/source-file`, и кэшируются в сессии.
+
+```json
+{
+  "sessionId": "k7Fm2xQp",
+  "depth": 2,
+  "names": ["com.example.UserService", "src/main/java/com/example/Helper.java"]
+}
+```
 
 | Метод | Путь | Тело | Ответ |
 |-------|------|------|-------|
-| POST | `/api/context` | `{ "sessionId" }` | `ContextResponse` |
-| POST | `/api/context/html` | `{ "sessionId" }` | HTML |
-| POST | `/api/context/markdown` | `{ "sessionId" }` | `List<String>` — `FileContext.toString()` на файл |
-| POST | `/api/plantuml` | `{ "session": { "sessionId" }, "pretty": true }` | `PlantUmlResponse` |
+| POST | `/api/context` | `{ "sessionId", "depth", "names"? }` | `ContextResponse` |
+| POST | `/api/context/html` | то же | HTML |
+| POST | `/api/context/markdown` | то же | `List<String>` — `FileContext.toString()` на файл |
+| POST | `/api/plantuml` | `{ "sessionId", "depth", "names"?, "pretty": true }` | `PlantUmlResponse` |
 | POST | `/api/plantuml/text` | то же | `text/plain` |
 
 ---
@@ -143,12 +155,12 @@
 
 ```json
 {
-  "session": { "sessionId": "k7Fm2xQp" },
-  "name": "UserService"
+  "sessionId": "k7Fm2xQp",
+  "names": ["UserService", "com.example.Foo"]
 }
 ```
 
-`name` — simple или qualified. Возвращает **все** совпадения в repo index и dependencySources.
+`names` — simple или qualified имена. По каждому имени возвращает **все** совпадения в repo index и dependencySources.
 
 #### `POST /api/source-lines/jar`
 
@@ -169,6 +181,7 @@
 |------|-----|-------|
 | 404 | `SESSION_NOT_FOUND` | Сессия не найдена / TTL |
 | 410 | `SESSION_TERMINATED` | Сессия терминирована (в т.ч. во время build) |
+| 400 | — | `names` не найдены в индексе; пустой `names` |
 | 422 | — | MR не `opened`/`locked` (только при create) |
 | 503 | — | `diff_refs` не готов |
 
@@ -176,7 +189,7 @@
 
 ## Breaking change (v2)
 
-Старый stateless-режим (полный `ContextRequest` на `/api/context`, `/api/plantuml`, `/api/source-lines/gitlab`) **удалён**. Клиент обязан использовать сессию.
+Старый stateless-режим (GitLab credentials на каждый work-запрос) **удалён**. Клиент обязан использовать сессию; `depth` передаётся только на structure-эндпоинтах.
 
 ---
 
@@ -200,7 +213,9 @@ src/main/java/service/structure/
 │   ├── GitLabService.java
 │   └── ...
 └── model/
+    ├── CreateSessionRequest.java
     ├── SessionRequest.java
+    ├── SessionIdRequest.java
     ├── CreateSessionResponse.java
     └── ...
 ```

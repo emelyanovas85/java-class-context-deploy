@@ -20,7 +20,6 @@ public final class ReviewSession {
     private final String projectId;
     private final String token;
     private final long mergeRequestIid;
-    private final int depth;
     private final PinnedRefs pinnedRefs;
     private final MergeRequestInfo mrInfo;
     private final List<Diff> diffs;
@@ -36,7 +35,6 @@ public final class ReviewSession {
             String projectId,
             String token,
             long mergeRequestIid,
-            int depth,
             PinnedRefs pinnedRefs,
             MergeRequestInfo mrInfo,
             List<Diff> diffs,
@@ -48,7 +46,6 @@ public final class ReviewSession {
         this.projectId = projectId;
         this.token = token;
         this.mergeRequestIid = mergeRequestIid;
-        this.depth = depth;
         this.pinnedRefs = pinnedRefs;
         this.mrInfo = mrInfo;
         this.diffs = List.copyOf(diffs);
@@ -62,7 +59,6 @@ public final class ReviewSession {
     public String projectId() { return projectId; }
     public String token() { return token; }
     public long mergeRequestIid() { return mergeRequestIid; }
-    public int depth() { return depth; }
     public PinnedRefs pinnedRefs() { return pinnedRefs; }
     public String sourceSha() { return pinnedRefs.sourceSha(); }
     public String targetSha() { return pinnedRefs.targetSha(); }
@@ -72,6 +68,11 @@ public final class ReviewSession {
     public Map<String, List<String>> mergedFileIndex() { return mergedFileIndex; }
     public Instant expiresAt() { return expiresAt; }
     public ReviewSessionCancellation cancellation() { return cancellation; }
+
+    /** {@code true}, если dependencySources уже собирали (lazy, при первом depth &gt; 0 или source-file). */
+    public boolean isDependencySourcesLoaded() {
+        return dependencySources.get() != null;
+    }
 
     /** Lazy-кэш dependencySources; {@code null}, если ещё не собирали. */
     public Map<String, Path> dependencySourcesOrNull() {

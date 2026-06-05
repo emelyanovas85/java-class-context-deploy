@@ -39,9 +39,11 @@ public class StructureController {
     @PostMapping("/context")
     public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
-        log.info("Building context for session {}, depth={}", session.sessionId(), session.depth());
+        log.info("Building context for session {}, depth={}, seeds={}",
+                session.sessionId(), request.depth(), seedLabel(request.names()));
         Instant start = Instant.now();
-        ContextResponse response = contextBuilderService.buildContext(session);
+        ContextResponse response = contextBuilderService.buildContext(
+                session, request.depth(), request.names());
         log.info("Context built for session {}: {} classes   {} ms",
                 session.sessionId(), response.totalClassesAnalyzed(),
                 Duration.between(start, Instant.now()).toMillis());
@@ -53,7 +55,8 @@ public class StructureController {
     public ResponseEntity<String> getContextHtml(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
         Instant start = Instant.now();
-        ContextResponse response = contextBuilderService.buildContext(session);
+        ContextResponse response = contextBuilderService.buildContext(
+                session, request.depth(), request.names());
         String html = htmlContextRenderer.render(response);
         log.info("HTML context built for session {} ({} classes)   {} ms",
                 session.sessionId(), response.totalClassesAnalyzed(),
@@ -67,16 +70,18 @@ public class StructureController {
     @PostMapping("/context/markdown")
     public ResponseEntity<List<String>> getContextMarkdown(@Valid @RequestBody SessionRequest request) {
         ReviewSession session = sessionResolver.requireActive(request.sessionId());
-        ContextResponse response = contextBuilderService.buildContext(session);
+        ContextResponse response = contextBuilderService.buildContext(
+                session, request.depth(), request.names());
         return ResponseEntity.ok(ContextMarkdownFormatter.toMarkdownLines(response));
     }
 
     @Operation(summary = "Построить PlantUML class diagram")
     @PostMapping("/plantuml")
     public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody PlantUmlSessionRequest request) {
-        ReviewSession session = sessionResolver.requireActive(request.session().sessionId());
+        ReviewSession session = sessionResolver.requireActive(request.sessionId());
         boolean pretty = request.prettyOrDefault();
-        ContextResponse context = contextBuilderService.buildContext(session);
+        ContextResponse context = contextBuilderService.buildContext(
+                session, request.depth(), request.names());
         String plantUml = plantUmlRenderer.render(context, pretty);
         PlantUmlResponse response = new PlantUmlResponse(
                 context.mergeRequest(),
@@ -90,10 +95,15 @@ public class StructureController {
     @Operation(summary = "Построить PlantUML (plain text)")
     @PostMapping(value = "/plantuml/text", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> getPlantUmlText(@Valid @RequestBody PlantUmlSessionRequest request) {
-        ReviewSession session = sessionResolver.requireActive(request.session().sessionId());
+        ReviewSession session = sessionResolver.requireActive(request.sessionId());
         boolean pretty = request.prettyOrDefault();
-        ContextResponse context = contextBuilderService.buildContext(session);
+        ContextResponse context = contextBuilderService.buildContext(
+                session, request.depth(), request.names());
         String plantUml = plantUmlRenderer.render(context, pretty);
         return ResponseEntity.ok().contentType(MediaType.TEXT_PLAIN).body(plantUml);
+    }
+
+    private static String seedLabel(List<String> names) {
+        return names == null ? "changed-files" : String.valueOf(names.size());
     }
 }

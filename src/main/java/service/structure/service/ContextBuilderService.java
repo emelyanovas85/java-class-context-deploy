@@ -112,26 +112,34 @@ public class ContextBuilderService {
      * Строит контекст по frozen-снимку сессии (pin SHA, merged index).
      * Поддерживает отмену через {@link service.structure.session.ReviewSessionCancellation}.
      */
-    public ContextResponse buildContext(ReviewSession session) {
+    public ContextResponse buildContext(ReviewSession session, int depth, List<String> seedNames) {
         session.cancellation().throwIfTerminated();
+        if (seedNames != null && seedNames.isEmpty()) {
+            throw new IllegalArgumentException("names must not be empty when provided");
+        }
         try (var ignored = parseCache.beginScope()) {
-            Map<String, Path> dependencySources =
-                    reviewSessionService.getOrBuildDependencySources(session);
+            boolean needsDependencies = depth > 0
+                    || (seedNames != null && gitLabService.anySeedUnresolvedInIndex(
+                            session.mergedFileIndex(), seedNames));
+            Map<String, Path> dependencySources = needsDependencies
+                    ? reviewSessionService.getOrBuildDependencySources(session)
+                    : reviewSessionService.getOrBuildDependencySources(session, depth);
             if (!dependencySources.isEmpty()) {
                 log.info("Dependency context: {} known external class names",
                         dependencySources.size());
             }
-            return buildContextInternal(session, dependencySources);
+            return buildContextInternal(session, depth, seedNames, dependencySources);
         }
     }
 
     private ContextResponse buildContextInternal(ReviewSession session,
+                                                 int depth,
+                                                 List<String> seedNames,
                                                  Map<String, Path> dependencySources) {
         MergeRequestInfo mrInfo = session.mrInfo();
         ReviewSessionCancellation cancellation = session.cancellation();
         String sourceRef = session.sourceSha();
         String targetRef = session.targetSha();
-        int depth = session.depth();
 
         Map<String, List<String>> fileIndex = session.mergedFileIndex();
 
@@ -149,9 +157,19 @@ public class ContextBuilderService {
         AtomicInteger totalResolved  = new AtomicInteger(0);
         AtomicInteger totalSkipped   = new AtomicInteger(0);
 
-        // ── Уровень 0 ─────────────────────────────────────────────────────────────────
+        List<StructureSeed> level0Seeds = resolveLevel0Seeds(session, seedNames, fileIndex, dependencySources);
+        List<String> level0RepoPaths = level0Seeds.stream()
+                .filter(StructureSeed.RepoFile.class::isInstance)
+                .map(s -> ((StructureSeed.RepoFile) s).path())
+                .toList();
+        List<String> level0DepQNames = level0Seeds.stream()
+                .filter(StructureSeed.DependencyClass.class::isInstance)
+                .map(s -> ((StructureSeed.DependencyClass) s).qualifiedName())
+                .toList();
+
+        // ── Уровень 0: repo ─────────────────────────────────────────────────────────────
         cancellation.throwIfTerminated();
-        List<CompletableFuture<Level0Result>> level0Futures = mrInfo.changedFiles().stream()
+        List<CompletableFuture<Level0Result>> level0Futures = level0RepoPaths.stream()
                 .map(filePath -> cancellation.supplyAsync(() -> {
                     log.debug("Level 0 [parallel]: fetch+parse {}", filePath);
                     Optional<String> src = gitLabService.readFileContent(
@@ -169,6 +187,13 @@ public class ContextBuilderService {
                     return new Level0Result(
                             filePath, src, tgt, srcFile.structures(), srcFile.nodes(), tgtNodes);
                 }, ioExecutor))
+                .toList();
+
+        // ── Уровень 0: dependency ───────────────────────────────────────────────────────
+        List<CompletableFuture<DependencyLevel0Result>> level0DepFutures = level0DepQNames.stream()
+                .map(qName -> cancellation.supplyAsync(
+                        () -> parseDependencyLevel0(qName, dependencySources, wildcardResolver),
+                        ioExecutor))
                 .toList();
 
         List<ClassStructure> level0 = new ArrayList<>();
@@ -199,10 +224,30 @@ public class ContextBuilderService {
             }
         }
 
+        for (DependencyLevel0Result r : awaitAll(level0DepFutures, cancellation)) {
+            if (r == null) {
+                continue;
+            }
+            for (ClassStructure cs : r.parsed()) {
+                mapNestedToRootTopLevel(cs, nestedToRootTopLevel);
+                if (processedQNames.add(cs.qualifiedName())) {
+                    int id = idCounter.getAndIncrement();
+                    qNameToId.put(cs.qualifiedName(), id);
+                    level0.add(cs);
+                    List<StructureNode> nodes =
+                            structureNodesForClass(r.nodes(), r.parsed(), cs);
+                    ClassContext ctx = ClassContext.of(
+                            id, Set.of(), cs.qualifiedName(), 0, r.module(), nodes, nodes);
+                    allContexts.add(ctx);
+                    storeParseCache(r.module(), cs.qualifiedName(), r.parsed(), r.nodes(), ctx);
+                }
+            }
+        }
+
         // ── Ранний возврат при depth=0 ────────────────────────────────────────────────
         if (depth == 0) {
-            log.info("depth=0: returning level-0 context only ({} classes from {} changed files)",
-                    allContexts.size(), mrInfo.changedFiles().size());
+            log.info("depth=0: returning level-0 context only ({} classes from {} seeds)",
+                    allContexts.size(), level0Seeds.size());
             List<ClassContext> resultContexts0 =
                     enrichAndFilterContexts(allContexts, level0, qNameToId, nestedToRootTopLevel);
             List<FileContext> resultFiles0 = groupContextsByFile(resultContexts0, level0);
@@ -322,6 +367,53 @@ public class ContextBuilderService {
         int totalClasses = resultContexts.size();
         return new ContextResponse(mrInfo, resultFiles, depth, totalClasses);
     }
+
+    private List<StructureSeed> resolveLevel0Seeds(ReviewSession session,
+                                                 List<String> seedNames,
+                                                 Map<String, List<String>> fileIndex,
+                                                 Map<String, Path> dependencySources) {
+        if (seedNames == null) {
+            return session.mrInfo().changedFiles().stream()
+                    .<StructureSeed>map(StructureSeed.RepoFile::new)
+                    .toList();
+        }
+        return gitLabService.resolveStructureSeeds(fileIndex, dependencySources, seedNames);
+    }
+
+    private DependencyLevel0Result parseDependencyLevel0(
+            String qName,
+            Map<String, Path> dependencySources,
+            BiFunction<String, List<String>, Optional<String>> wildcardResolver) {
+        String jarCandidate = qName;
+        while (!jarCandidate.isEmpty()) {
+            Path jarPath = dependencySources.get(jarCandidate);
+            if (jarPath != null) {
+                Optional<String> content = classNameExtractor.extractSourceFile(jarPath, jarCandidate);
+                if (content.isPresent()) {
+                    String module = jarSource(jarPath);
+                    String syntheticPath = jarCandidate.replace('.', '/') + ".java";
+                    ParsedJavaFile file = sourceParseService.parse(
+                            content.get(), syntheticPath, 0, wildcardResolver);
+                    log.debug("Level 0 [dependency]: parsed {} from {}", qName, module);
+                    return new DependencyLevel0Result(qName, module, file.structures(), file.nodes());
+                }
+            }
+            int lastDot = jarCandidate.lastIndexOf('.');
+            if (lastDot < 0) {
+                break;
+            }
+            jarCandidate = jarCandidate.substring(0, lastDot);
+        }
+        log.warn("Dependency seed '{}' could not be loaded from sources.jar", qName);
+        return null;
+    }
+
+    private record DependencyLevel0Result(
+            String qName,
+            String module,
+            List<ClassStructure> parsed,
+            List<StructureNode> nodes
+    ) {}
 
     // ── mergeResults ────────────────────────────────────────────────────────────────
 

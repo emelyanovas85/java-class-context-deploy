@@ -41,10 +41,12 @@ class FileSourceServiceTest {
         when(gitLabService.qualifiedNameFromRepoPath(anyString()))
                 .thenReturn("a.Foo", "b.Foo");
 
-        FileSourceResponse response = fileSourceService.resolve(session, "Foo");
+        FileSourceResponse response = fileSourceService.resolve(session, List.of("Foo"));
 
-        assertThat(response.files()).hasSize(2);
-        assertThat(response.files()).allMatch(f -> "repo".equals(f.origin()));
+        assertThat(response.names()).hasSize(1);
+        assertThat(response.names().get(0).name()).isEqualTo("Foo");
+        assertThat(response.names().get(0).files()).hasSize(2);
+        assertThat(response.names().get(0).files()).allMatch(f -> "repo".equals(f.origin()));
     }
 
     private static ReviewSession testSession(Map<String, List<String>> index) {
@@ -53,7 +55,7 @@ class FileSourceServiceTest {
                 1L, "t", "opened", "s", "t", "u",
                 List.of(), List.of(), List.of(), refs);
         return new ReviewSession(
-                "sess1234", "https://gitlab.com", "p", "token", 1L, 1,
+                "sess1234", "https://gitlab.com", "p", "token", 1L,
                 refs, mr, List.of(), index, Instant.now().plusSeconds(3600),
                 new ReviewSessionCancellation("sess1234"));
     }

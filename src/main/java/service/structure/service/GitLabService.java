@@ -13,10 +13,13 @@ import org.gitlab4j.api.models.TreeItem;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import service.structure.exception.DiffRefsNotReadyException;
+import service.structure.exception.SeedFilesNotFoundException;
 import service.structure.model.CommitInfo;
 import service.structure.model.MergeRequestInfo;
 import service.structure.model.PinnedRefs;
+import service.structure.model.StructureSeed;
 
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -226,6 +229,117 @@ public class GitLabService {
                 .sorted()
                 .toList();
         return List.copyOf(filtered);
+    }
+
+    /**
+     * {@code true}, если хотя бы одно имя из {@code names} не резолвится в repo-индексе
+     * (возможен fallback в dependencySources).
+     */
+    public boolean anySeedUnresolvedInIndex(Map<String, List<String>> fileIndex, List<String> names) {
+        for (String raw : names) {
+            if (raw == null || raw.isBlank()) {
+                continue;
+            }
+            String name = raw.trim();
+            if (isRepoJavaPath(name)) {
+                continue;
+            }
+            String normalized = normalizeName(name);
+            boolean qualified = normalized.contains(".");
+            if (findAllJavaPathsByName(fileIndex, normalized, qualified).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Резолвит имена в корни обхода: сначала repo-индекс, затем dependencySources.
+     *
+     * @throws SeedFilesNotFoundException если имя не найдено ни в индексе, ни в jar
+     */
+    public List<StructureSeed> resolveStructureSeeds(Map<String, List<String>> fileIndex,
+                                                     Map<String, Path> dependencySources,
+                                                     List<String> names) {
+        LinkedHashSet<StructureSeed> seeds = new LinkedHashSet<>();
+        List<String> notFound = new ArrayList<>();
+        for (String raw : names) {
+            String name = raw.trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            List<StructureSeed> resolved = resolveOneSeed(fileIndex, dependencySources, name);
+            if (resolved.isEmpty()) {
+                notFound.add(raw);
+            } else {
+                seeds.addAll(resolved);
+            }
+        }
+        if (!notFound.isEmpty()) {
+            throw new SeedFilesNotFoundException(notFound);
+        }
+        if (seeds.isEmpty()) {
+            throw new SeedFilesNotFoundException(names);
+        }
+        return List.copyOf(seeds);
+    }
+
+    private List<StructureSeed> resolveOneSeed(Map<String, List<String>> fileIndex,
+                                               Map<String, Path> dependencySources,
+                                               String name) {
+        if (isRepoJavaPath(name)) {
+            return List.of(new StructureSeed.RepoFile(name));
+        }
+        String normalized = normalizeName(name);
+        boolean qualified = normalized.contains(".");
+        List<String> repoPaths = findAllJavaPathsByName(fileIndex, normalized, qualified);
+        if (!repoPaths.isEmpty()) {
+            return repoPaths.stream().<StructureSeed>map(StructureSeed.RepoFile::new).toList();
+        }
+        List<String> depKeys = resolveDependencyKeys(dependencySources, normalized, qualified);
+        if (depKeys.isEmpty()) {
+            return List.of();
+        }
+        return depKeys.stream().<StructureSeed>map(StructureSeed.DependencyClass::new).toList();
+    }
+
+    private static List<String> resolveDependencyKeys(Map<String, Path> dependencySources,
+                                                      String normalized,
+                                                      boolean qualified) {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        if (qualified) {
+            String candidate = normalized;
+            while (!candidate.isEmpty()) {
+                if (dependencySources.containsKey(candidate)) {
+                    keys.add(candidate);
+                }
+                int lastDot = candidate.lastIndexOf('.');
+                if (lastDot < 0) {
+                    break;
+                }
+                candidate = candidate.substring(0, lastDot);
+            }
+        } else {
+            for (String qName : dependencySources.keySet()) {
+                if (matchesDependencySimpleName(qName, normalized)) {
+                    keys.add(qName);
+                }
+            }
+        }
+        return List.copyOf(keys);
+    }
+
+    private static boolean matchesDependencySimpleName(String qName, String simpleName) {
+        int lastDot = qName.lastIndexOf('.');
+        String simple = lastDot < 0 ? qName : qName.substring(lastDot + 1);
+        if (simple.contains("$")) {
+            simple = simple.substring(0, simple.indexOf('$'));
+        }
+        return simple.equals(simpleName);
+    }
+
+    private static boolean isRepoJavaPath(String name) {
+        return name.endsWith(".java") && name.contains("/");
     }
 
     /** Убирает пробелы и суффикс {@code .java} из имени класса/файла. */

@@ -8,9 +8,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import service.structure.model.ContextRequest;
+import service.structure.model.CreateSessionRequest;
 import service.structure.model.CreateSessionResponse;
-import service.structure.model.SessionRequest;
+import service.structure.model.SessionIdRequest;
 import service.structure.session.ReviewSessionService;
 
 @Slf4j
@@ -30,9 +30,9 @@ public class ReviewSessionController {
             Повторный create на тот же MR терминирует предыдущую сессию.
             """)
     @PostMapping
-    public ResponseEntity<CreateSessionResponse> create(@Valid @RequestBody ContextRequest request) {
-        log.info("Creating review session for MR !{} in project '{}', depth={}",
-                request.mergeRequestIid(), request.projectId(), request.depth());
+    public ResponseEntity<CreateSessionResponse> create(@Valid @RequestBody CreateSessionRequest request) {
+        log.info("Creating review session for MR !{} in project '{}'",
+                request.mergeRequestIid(), request.projectId());
         CreateSessionResponse response = reviewSessionService.create(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
@@ -42,7 +42,7 @@ public class ReviewSessionController {
             Идемпотентно: 204 даже если сессия уже удалена.
             """)
     @DeleteMapping
-    public ResponseEntity<Void> terminate(@Valid @RequestBody SessionRequest request) {
+    public ResponseEntity<Void> terminate(@Valid @RequestBody SessionIdRequest request) {
         log.info("Terminating review session {}", request.sessionId());
         reviewSessionService.terminate(request.sessionId());
         return ResponseEntity.noContent().build();

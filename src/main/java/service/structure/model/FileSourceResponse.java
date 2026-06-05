@@ -3,12 +3,12 @@ package service.structure.model;
 import java.util.List;
 
 /**
- * Ответ {@code POST /api/source-file}: все найденные совпадения в repo и dependencies.
- *
- * @param name  исходное имя из запроса
- * @param files совпадения (может быть пустым списком)
+ * Ответ {@code POST /api/source-file}: совпадения по каждому запрошенному имени.
  */
-public record FileSourceResponse(String name, List<FileMatch> files) {
+public record FileSourceResponse(List<NameResult> names) {
+
+    /** Результат поиска по одному имени из запроса. */
+    public record NameResult(String name, List<FileMatch> files) {}
 
     /**
      * Один найденный исходник.

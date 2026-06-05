@@ -15,7 +15,7 @@ public record GitLabLinesSessionRequest(
 
         @NotNull(message = "session must not be null")
         @Valid
-        SessionRequest session,
+        SessionIdRequest session,
 
         @NotEmpty(message = "classes must not be empty")
         @Valid

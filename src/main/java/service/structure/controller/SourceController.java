@@ -55,9 +55,9 @@ public class SourceController {
             """)
     @PostMapping("/source-file")
     public ResponseEntity<FileSourceResponse> getSourceFile(@Valid @RequestBody FileSourceRequest request) {
-        ReviewSession session = sessionResolver.requireActive(request.session().sessionId());
-        log.info("Fetching source file for session {}: name='{}'",
-                session.sessionId(), request.name());
-        return ResponseEntity.ok(fileSourceService.resolve(session, request.name()));
+        ReviewSession session = sessionResolver.requireActive(request.sessionId());
+        log.info("Fetching source files for session {}: names={}",
+                session.sessionId(), request.names());
+        return ResponseEntity.ok(fileSourceService.resolve(session, request.names()));
     }
 }

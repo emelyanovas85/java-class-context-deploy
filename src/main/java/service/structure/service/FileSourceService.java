@@ -29,8 +29,16 @@ public class FileSourceService {
     private final DependencyClassNameExtractor classNameExtractor;
     private final ReviewSessionService reviewSessionService;
 
-    /** Возвращает все совпадения (repo + jar), без выбора одного кандидата. */
-    public FileSourceResponse resolve(ReviewSession session, String name) {
+    /** Возвращает все совпадения (repo + jar) по каждому имени из запроса. */
+    public FileSourceResponse resolve(ReviewSession session, List<String> names) {
+        List<FileSourceResponse.NameResult> results = new ArrayList<>(names.size());
+        for (String name : names) {
+            results.add(new FileSourceResponse.NameResult(name, resolveOne(session, name)));
+        }
+        return new FileSourceResponse(results);
+    }
+
+    private List<FileMatch> resolveOne(ReviewSession session, String name) {
         String normalized = GitLabService.normalizeName(name);
         boolean qualified = normalized.contains(".");
 
@@ -40,7 +48,7 @@ public class FileSourceService {
         List<FileMatch> all = new ArrayList<>(repoMatches.size() + depMatches.size());
         all.addAll(repoMatches);
         all.addAll(depMatches);
-        return new FileSourceResponse(name, all);
+        return all;
     }
 
     private List<FileMatch> resolveRepo(ReviewSession session, String normalized, boolean qualified) {

@@ -1,15 +1,14 @@
 package service.structure.model;
 
 import io.swagger.v3.oas.annotations.media.Schema;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
 /**
- * Входящий запрос на построение контекста.
+ * Запрос на создание сессии ревью: credentials и MR, без параметров построения контекста.
  */
-@Schema(description = "Параметры мёрж-реквеста GitLab для анализа")
-public record ContextRequest(
+@Schema(description = "Параметры мёрж-реквеста GitLab для создания сессии")
+public record CreateSessionRequest(
 
         @Schema(description = "URL GitLab-инстанса", example = "https://gitlab.com")
         @NotBlank(message = "gitlabUrl must not be blank")
@@ -19,15 +18,11 @@ public record ContextRequest(
         @NotBlank(message = "projectId must not be blank")
         String projectId,
 
-        @Schema(description = "Personal или Project Access Token", example = "glpat-**MmA5L59_C_JYzqXpY23a**")
+        @Schema(description = "Personal или Project Access Token", example = "glpat-xxxxxxxxxxxx")
         @NotBlank(message = "token must not be blank")
         String token,
 
         @Schema(description = "IID мёрж-реквеста (внутренний номер в проекте)", example = "42")
         @NotNull(message = "mergeRequestIid must not be null")
-        Long mergeRequestIid,
-
-        @Schema(description = "Глубина контекста: 0 = только изменённые файлы, 1+ = + зависимости", example = "2", minimum = "0")
-        @Min(value = 0, message = "depth must be >= 0")
-        int depth
+        Long mergeRequestIid
 ) {}
