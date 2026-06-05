@@ -9,10 +9,17 @@ spring:
       indent-output: true
 
 app:
+  file-index-cache:
+    expire-after-access-minutes: 15
   parse-cache:
     enabled: true
     dir: artifacts
     expire-after-access-minutes: 5
+  review-session:
+    ttl-minutes: 120
+    uid-length: 8
+    diff-refs-retry-attempts: 3
+    diff-refs-retry-delay-ms: 500
 
 logging:
   level:

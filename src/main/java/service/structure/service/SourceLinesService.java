@@ -6,8 +6,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import service.structure.dependency.DependencyClassNameExtractor;
 import service.structure.dependency.DependencyCoordinate;
-import service.structure.model.GitLabLinesRequest;
+import service.structure.model.ClassLines;
+import service.structure.model.GitLabLinesSessionRequest;
 import service.structure.model.JarLinesRequest;
+import service.structure.session.ReviewSession;
 import service.structure.model.SourceLinesResponse;
 import service.structure.model.SourceLinesResponse.FileResult;
 import service.structure.parser.JavaStructureParser;
@@ -39,23 +41,24 @@ public class SourceLinesService {
 
     // ── GitLab ────────────────────────────────────────────────────────────
 
-    public SourceLinesResponse fetchFromGitLab(GitLabLinesRequest request) {
-        Map<String, List<String>> index = gitLabService.buildRawIndex(
-                request.gitlabUrl(), request.token(), request.projectId(), request.ref());
-
+    /**
+     * Строки из GitLab по сессии: ref = pinned {@code sourceSha}, index = merged index.
+     */
+    public SourceLinesResponse fetchFromGitLab(ReviewSession session, GitLabLinesSessionRequest request) {
+        Map<String, List<String>> index = session.mergedFileIndex();
         List<FileResult> results = request.classes().stream()
-                .map(c -> processGitLabClass(request, index, c))
+                .map(c -> processGitLabClass(session, index, c))
                 .toList();
         return new SourceLinesResponse(results);
     }
 
-    private FileResult processGitLabClass(GitLabLinesRequest request,
+    private FileResult processGitLabClass(ReviewSession session,
                                           Map<String, List<String>> index,
-                                          GitLabLinesRequest.ClassLines classLines) {
+                                          ClassLines classLines) {
         String qName = classLines.qualifiedName();
         String pathPrefix = classLines.sourcePathPrefix();
 
-        Optional<String> filePath = resolveGitLabFilePath(request, index, qName, pathPrefix);
+        Optional<String> filePath = resolveGitLabFilePath(session, index, qName, pathPrefix);
         if (filePath.isEmpty()) {
             log.warn("Class not found in index: {} (source={})", qName, classLines.source());
             return FileResult.ofError(qName,
@@ -68,8 +71,8 @@ public class SourceLinesService {
         Optional<String> content;
         try {
             content = gitLabService.readRawFileContent(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), request.ref(), filePath.get());
+                    session.gitlabUrl(), session.token(),
+                    session.projectId(), session.sourceSha(), filePath.get());
         } catch (RuntimeException e) {
             log.warn("Failed to read {}: {}", filePath.get(), e.getMessage());
             return FileResult.ofError(qName, e.getMessage());
@@ -82,7 +85,7 @@ public class SourceLinesService {
         return toFileResult(qName, content.get(), classLines.rows());
     }
 
-    private Optional<String> resolveGitLabFilePath(GitLabLinesRequest request,
+    private Optional<String> resolveGitLabFilePath(ReviewSession session,
                                                    Map<String, List<String>> index,
                                                    String qualifiedName,
                                                    String pathPrefix) {
@@ -97,8 +100,8 @@ public class SourceLinesService {
         for (String candidatePath : gitLabService.listJavaFilesInPackage(index, packageName)) {
             try {
                 Optional<String> content = gitLabService.readRawFileContent(
-                        request.gitlabUrl(), request.token(),
-                        request.projectId(), request.ref(), candidatePath);
+                        session.gitlabUrl(), session.token(),
+                        session.projectId(), session.sourceSha(), candidatePath);
                 if (content.isPresent()
                         && structureParser.containsTopLevelType(content.get(), simpleName)) {
                     log.debug("Resolved {} via package scan in {}", qualifiedName, candidatePath);

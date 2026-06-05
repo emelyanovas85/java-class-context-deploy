@@ -1,21 +1,33 @@
 # java-context-service
 
-Веб-сервис на Java 21 + Spring Boot для построения структурного контекста Java-классов по GitLab Merge Request: сравнение source/target веток, рекурсивный обход зависимостей (включая внешние `sources.jar`) и выдача фрагментов исходного кода по номерам строк.
+Веб-сервис на Java 21 + Spring Boot для построения структурного контекста Java-классов по GitLab Merge Request с **сессией ревью** и pin коммитов source/target.
 
 ---
 
 ## Что делает сервис
 
-1. Принимает параметры MR (URL GitLab, токен, ID проекта, IID реквеста, глубина контекста).
-2. Проверяет, что MR в состоянии `opened` или `locked` (смерженные и закрытые MR не анализируются).
-3. Получает метаданные MR через **gitlab4j-api**: ветки, коммиты, diff, список изменённых `.java`-файлов.
-4. Строит **мёрженный файловый индекс** репозитория (target-ветка + патч из diff MR) для резолвинга типов по qualified name.
-5. Парсит изменённые файлы на **обеих ветках** (source и target) через **JavaParser** и сравнивает структуры.
-6. Для каждого класса возвращает **дерево `StructureNode`**: сигнатуры с аннотациями, поля, методы, конструкторы, вложенные типы — с диапазонами строк (`rows`).
-7. Если `depth > 1`: волновым BFS находит упомянутые типы (поля, параметры, возвраты, исключения, bounds дженериков, аннотации), резолвит их в репозитории или во **внешних зависимостях** (Maven/Gradle → Artifactory → `*-sources.jar`).
-8. Строит **граф зависимостей**: у каждого класса есть сквозной `id` и множество `callerIds` (кто на него ссылается).
-9. Группирует классы по `.java`-файлам в `FileContext`.
-10. Дополнительно: HTML-страница для отладки и эндпоинты для выборки строк исходников по `rows` из GitLab или локального jar.
+1. **Создаёт сессию ревью** (`POST /api/review-sessions`): один раз получает MR, фиксирует `sourceSha` / `targetSha` / `baseSha` и снимок diff.
+2. **Work-запросы** с `sessionId` в теле: контекст, PlantUML, исходники — без повторной передачи GitLab credentials.
+3. **Терминирует сессию** (`DELETE /api/review-sessions`): отменяет in-flight задачи и удаляет данные из store.
+4. Парсит изменённые файлы на **зафиксированных SHA** (source/target) через **JavaParser** и сравнивает структуры.
+5. При `depth > 0` — волновой BFS зависимостей (репозиторий + `sources.jar`).
+6. Группирует классы по `.java`-файлам в `FileContext`.
+
+**Управление актуальностью MR** — на стороне оркестратора: при обновлении MR → `DELETE` старой сессии → `POST` новой. Сервис **не отслеживает** изменения MR автоматически.
+
+### Типичный flow клиента
+
+```text
+1. POST /api/review-sessions  { gitlabUrl, projectId, token, mergeRequestIid, depth }
+   → sessionId, sourceSha, targetSha, expiresAt
+
+2. POST /api/context          { "sessionId": "…" }
+   POST /api/context/markdown  { "sessionId": "…" }
+   POST /api/source-file       { "sessionId": "…", "name": "com.example.Foo" }
+   …
+
+3. DELETE /api/review-sessions { "sessionId": "…" }
+```
 
 ---
 
@@ -27,7 +39,7 @@
 | Spring Boot | 3.4.5 (`web`, `validation`) |
 | gitlab4j-api | 6.0.0 |
 | JavaParser | 3.26.3 |
-| Caffeine | TTL-кэш файлового индекса GitLab |
+| Caffeine | TTL-кэш сессий и файлового индекса GitLab |
 | springdoc-openapi | 2.8.8 (Swagger UI) |
 | Lombok | 1.18.36 |
 
@@ -39,35 +51,34 @@
 ./gradlew bootRun
 ```
 
-Сервис доступен на `http://localhost:8080`.
+Сервис: `http://localhost:8080`
 
-**Swagger UI:** [http://localhost:8080/docs](http://localhost:8080/docs)  
-**OpenAPI JSON:** [http://localhost:8080/api-docs](http://localhost:8080/api-docs)
+**Swagger UI:** [http://localhost:8080/docs](http://localhost:8080/docs) — теги **Sessions**, **Structure**, **Sources**
 
 ---
 
 ## Конфигурация
 
-Основные параметры в `src/main/resources/application.yml` и `application.properties`:
-
 | Параметр | По умолчанию | Описание |
 |----------|--------------|----------|
 | `server.port` | `8080` | Порт HTTP |
-| `app.file-index-cache.expire-after-access-minutes` | `15` | TTL кэша raw-индекса файлов GitLab |
-| `app.parse-cache.enabled` | `true` | Включить кэш результатов парсинга |
-| `app.parse-cache.dir` | `artifacts` | Каталог для jar, `.module` и дискового parse-кэша |
-| `app.parse-cache.expire-after-access-minutes` | `5` | TTL in-memory parse-кэша (Caffeine) |
-| `app.artifacts-dir` | `artifacts` | Каталог для скачанных `sources.jar` (используется `SourceLinesService`) |
+| `app.file-index-cache.expire-after-access-minutes` | `15` | TTL кэша raw-индекса (ключ: `gitlabUrl::projectId::ref`) |
+| `app.parse-cache.enabled` | `true` | Кэш результатов парсинга |
+| `app.parse-cache.dir` | `artifacts` | Каталог jar / disk parse-кэша |
+| `app.parse-cache.expire-after-access-minutes` | `5` | TTL in-memory parse-кэша |
+| `app.review-session.ttl-minutes` | `120` | TTL сессии (expireAfterWrite) |
+| `app.review-session.uid-length` | `8` | Длина `sessionId` |
+| `app.review-session.diff-refs-retry-attempts` | `3` | Retry при `diff_refs == null` |
+| `app.review-session.diff-refs-retry-delay-ms` | `500` | Пауза между retry |
+| `app.artifacts-dir` | `artifacts` | Каталог `sources.jar` |
 
 ---
 
 ## API
 
-### `POST /api/context`
+### Сессии (`ReviewSessionController`)
 
-Строит JSON-контекст по MR.
-
-**Request body:**
+#### `POST /api/review-sessions`
 
 ```json
 {
@@ -79,202 +90,119 @@
 }
 ```
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `gitlabUrl` | String | URL GitLab-инстанса (без слэша в конце) |
-| `projectId` | String | ID проекта или `namespace/name` |
-| `token` | String | Personal Access Token или Project Access Token |
-| `mergeRequestIid` | Long | IID мёрж-реквеста (внутренний номер в проекте) |
-| `depth` | int ≥ 1 | Глубина: `1` — только изменённые файлы MR, `2+` — + зависимости |
-
-**Ответ (`ContextResponse`):**
+**Ответ `201`:**
 
 ```json
 {
-  "mergeRequest": { "iid": 42, "title": "...", "state": "opened", "sourceBranch": "...", "targetBranch": "...", "..." : "..." },
-  "files": [
-    {
-      "path": "src/main/java/com/example/Foo.java",
-      "module": "src/main",
-      "level": 0,
-      "classes": [
-        {
-          "kind": "modified",
-          "id": 1,
-          "name": "com.example.Foo",
-          "level": 0,
-          "callerIds": [],
-          "module": "src/main",
-          "structureSource": [ { "type": "class", "signature": "...", "rows": "10-45", "children": [ "..." ] } ],
-          "structureTarget": [ "..." ]
-        }
-      ]
-    }
-  ],
-  "requestedDepth": 2,
-  "totalClassesAnalyzed": 15
+  "sessionId": "k7Fm2xQp",
+  "sourceSha": "e82eb4a0…",
+  "targetSha": "1162f719…",
+  "baseSha": "1162f719…",
+  "expiresAt": "2026-06-05T14:00:00Z"
 }
 ```
 
-**Семантика полей:**
+Повторный create на тот же MR терминирует предыдущую сессию.
 
-- **`level`** — `0` = класс из изменённого файла MR; `1` = прямая зависимость; `2` = зависимость зависимости и т.д.
-- **`module`** — источник класса: `src/main`, `src/test` или Maven-координаты `groupId:artifactId:version` для внешней зависимости.
-- **`kind`** — `unchanged` (структуры source/target совпали) или `modified` (различаются, либо файл создан/удалён).
-- **`id` / `callerIds`** — граф ссылок между классами в рамках одного ответа.
-- **`StructureNode`** — рекурсивное дерево: `type` (`class`, `interface`, `enum`, `record`, `annotation`, `field`, `method`, `constructor`), `signature`, `rows` (`"17"` или `"19-22"`), `children`.
+#### `DELETE /api/review-sessions`
+
+Тело: `{ "sessionId": "k7Fm2xQp" }` → `204`
 
 ---
 
-### `POST /api/context/html`
+### Структуры и UML (`StructureController`)
 
-Те же параметры, что у `/api/context`. Возвращает HTML-страницу для отладки (шаблон `context-debug.html` + встроенный JSON контекста).
+Все эндпоинты принимают `sessionId` в теле. `depth` зафиксирован при create.
+
+| Метод | Путь | Тело | Ответ |
+|-------|------|------|-------|
+| POST | `/api/context` | `{ "sessionId" }` | `ContextResponse` |
+| POST | `/api/context/html` | `{ "sessionId" }` | HTML |
+| POST | `/api/context/markdown` | `{ "sessionId" }` | `List<String>` — `FileContext.toString()` на файл |
+| POST | `/api/plantuml` | `{ "session": { "sessionId" }, "pretty": true }` | `PlantUmlResponse` |
+| POST | `/api/plantuml/text` | то же | `text/plain` |
 
 ---
 
-### `POST /api/source-lines/gitlab`
+### Исходники (`SourceController`)
 
-Читает строки из GitLab-репозитория по диапазонам из `StructureNode.rows`.
+#### `POST /api/source-lines/gitlab`
 
 ```json
 {
-  "gitlabUrl": "https://gitlab.com",
-  "projectId": "mygroup/myproject",
-  "token": "glpat-xxxxxxxxxxxx",
-  "ref": "main",
+  "session": { "sessionId": "k7Fm2xQp" },
   "classes": [
-    {
-      "qualifiedName": "com.example.Foo",
-      "source": "main",
-      "rows": ["28-168", "40"]
-    }
+    { "qualifiedName": "com.example.Foo", "source": "main", "rows": ["28-168"] }
   ]
 }
 ```
 
-| Поле | Описание |
-|------|----------|
-| `ref` | Ветка или коммит |
-| `classes[].source` | `"main"` \| `"test"` \| `null` — уточняет поиск при коллизии одноимённых классов |
-| `classes[].rows` | Диапазоны строк, как в `StructureNode.rows` |
+`ref` = pinned `sourceSha` из сессии.
 
-Ошибки по отдельным классам возвращаются в теле ответа (HTTP 200) в поле `error` вместо `snippets`.
+#### `POST /api/source-file`
 
----
+```json
+{
+  "session": { "sessionId": "k7Fm2xQp" },
+  "name": "UserService"
+}
+```
 
-### `POST /api/source-lines/jar`
+`name` — simple или qualified. Возвращает **все** совпадения в repo index и dependencySources.
 
-Читает строки из локального `*-sources.jar` (скачанного сервисом в `artifacts/`).
+#### `POST /api/source-lines/jar`
+
+Без сессии (как раньше):
 
 ```json
 {
   "source": "org.aspectj:aspectjweaver:1.9.22",
-  "classes": [
-    {
-      "qualifiedName": "org.aspectj.weaver.Advice",
-      "rows": ["17", "19-22"]
-    }
-  ]
+  "classes": [{ "qualifiedName": "org.aspectj.weaver.Advice", "rows": ["17"] }]
 }
 ```
 
-| Поле | Описание |
-|------|----------|
-| `source` | Maven-координаты — то же значение, что `module` у `ClassContext` для внешней зависимости |
+---
+
+## Коды ошибок
+
+| HTTP | Код | Когда |
+|------|-----|-------|
+| 404 | `SESSION_NOT_FOUND` | Сессия не найдена / TTL |
+| 410 | `SESSION_TERMINATED` | Сессия терминирована (в т.ч. во время build) |
+| 422 | — | MR не `opened`/`locked` (только при create) |
+| 503 | — | `diff_refs` не готов |
 
 ---
 
-## Алгоритм построения контекста
+## Breaking change (v2)
 
-```
-1. MR metadata + проверка state ∈ {opened, locked}
-2. Raw file index (target branch, TTL-кэш) → merged index (+ diff MR)
-3. Зависимости: pom.xml / *.gradle → Artifactory → sources.jar + .module (BFS, параллельно)
-4. Уровень 0:
-     changedFiles → fetch source + target → parse → merge → ClassContext[]
-5. Уровни 1..depth-1 (волновой BFS):
-     collectReferencedTypes() → resolve (repo index | jar index)
-     → parse (JavaSourceParseService) → merge → следующая волна
-6. Финальный пасс: нерезолвленные типы
-7. groupContextsByFile() → List<FileContext>
-```
-
-Parse-кэш: in-memory (Caffeine, scope на запрос) + диск (`{module}__cache.json` для jar-модулей).
-
----
-
-## Выбор библиотеки для парсинга Java
-
-| Библиотека | Плюсы | Минусы | Вердикт |
-|------------|-------|--------|---------|
-| **JavaParser** | Простой API, нет внешних зависимостей, активная разработка, поддержка Java 21+ | Нет семантического анализа без symbol solver | ✅ Выбрана |
-| **Spoon** | Семантический анализ, трансформации AST | Тяжёлый, строит на Eclipse JDT, сложная интеграция | Избыточен для задачи |
-| **Eclipse JDT** | Компилятор, полный семантический анализ | OSGi-зависимости, сложная настройка без Eclipse | Слишком сложен |
-| **QDox** | Быстрый, маленький, ориентирован на сигнатуры | Ограниченный AST, нет аннотаций на параметрах | Недостаточно богат |
-
-**Итог:** JavaParser даёт полный AST с аннотациями, лёгкий в использовании и достаточен для извлечения структуры без компиляции.
+Старый stateless-режим (полный `ContextRequest` на `/api/context`, `/api/plantuml`, `/api/source-lines/gitlab`) **удалён**. Клиент обязан использовать сессию.
 
 ---
 
 ## Структура проекта
 
 ```
-src/main/java/ru/kalinin/context/
-├── JavaContextServiceApplication.java
-├── cache/
-│   ├── ClassContextParseCache.java       # memory + disk parse-кэш
-│   ├── ParseCacheRequestScope.java
-│   ├── ParseCacheEntry.java
-│   └── ParseCacheDiskFile.java
-├── config/
-│   ├── AsyncConfig.java                  # ioExecutor для параллельного I/O
-│   ├── CacheConfig.java                  # Caffeine-бины
-│   └── OpenApiConfig.java
+src/main/java/service/structure/
 ├── controller/
-│   ├── ContextController.java            # REST API
+│   ├── ReviewSessionController.java   # Sessions
+│   ├── StructureController.java       # Structure
+│   ├── SourceController.java          # Sources
 │   └── GlobalExceptionHandler.java
-├── dependency/
-│   ├── ArtifactorySourcesLoader.java     # скачивание sources.jar / .module
-│   ├── DependencyClassNameExtractor.java
-│   ├── DependencyContextService.java     # оркестрация зависимостей
-│   ├── DependencyCoordinate.java
-│   ├── DependencyExtractor.java
-│   ├── GradleDependencyExtractor.java
-│   └── MavenDependencyExtractor.java
-├── exception/
-│   └── MergeRequestAlreadyMergedException.java
-├── model/
-│   ├── ClassContext.java                 # sealed: unchanged | modified
-│   ├── UnchangedClassContext.java
-│   ├── ModifiedClassContext.java
-│   ├── StructureNode.java                # рекурсивное дерево структуры
-│   ├── StructureNodePrinter.java
-│   ├── FileContext.java                  # группировка классов по файлу
-│   ├── ContextRequest.java / ContextResponse.java
-│   ├── GitLabLinesRequest.java / JarLinesRequest.java
-│   ├── SourceLinesResponse.java
-│   ├── MergeRequestInfo.java / CommitInfo.java
-│   └── ClassStructure.java, FieldInfo, MethodInfo, ...  # внутренние модели парсера
-├── parser/
-│   ├── JavaStructureParser.java
-│   ├── JavaSourceParseService.java
-│   ├── StructureNodeMapper.java
-│   ├── SignatureBuilder.java
-│   ├── JavaLangTypeRegistry.java
-│   ├── ParsedJavaFile.java
-│   └── UnresolvedTypeRef.java
-└── service/
-    ├── ContextBuilderService.java        # оркестрация построения контекста
-    ├── DependencyContextService.java
-    ├── GitLabService.java                # GitLab API + file index
-    ├── HtmlContextRenderer.java          # HTML для /api/context/html
-    └── SourceLinesService.java           # /api/source-lines/*
-
-src/main/resources/
-├── application.yml
-├── application.properties
-├── templates/context-debug.html
-└── static/context-debug.{js,css}
+├── session/
+│   ├── ReviewSession.java
+│   ├── ReviewSessionService.java
+│   ├── ReviewSessionResolver.java
+│   └── ReviewSessionCancellation.java
+├── service/
+│   ├── ContextBuilderService.java
+│   ├── FileSourceService.java
+│   ├── GitLabService.java
+│   └── ...
+└── model/
+    ├── SessionRequest.java
+    ├── CreateSessionResponse.java
+    └── ...
 ```
 
 ---
@@ -285,13 +213,10 @@ src/main/resources/
 ./gradlew test
 ```
 
-| Тест | Что покрывает |
-|------|---------------|
-| `JavaStructureParserTest` | Парсинг class/record/nested, полей, методов, конструкторов, аннотаций, referenced types |
-| `StructureNodeMapperTest` | Маппинг AST → `StructureNode`, диапазоны строк |
-| `JavaSourceParseServiceTest` | Парсинг файлов, кэширование на уровне сервиса |
-| `ClassContextParseCacheTest` | Memory/disk parse-кэш |
-| `ContextBuilderGroupByFileTest` | Группировка классов по файлам |
-| `ContextBuilderMergeResultsTest` | Merge source/target структур |
-| `ContextBuilderNestedWaveTest` | Волновой BFS по зависимостям |
-| `HtmlContextRendererTest` | HTML-рендер контекста |
+| Тест | Покрытие |
+|------|----------|
+| `ReviewSessionCancellationTest` | terminate + cancel futures |
+| `ContextMarkdownFormatterTest` | `/api/context/markdown` |
+| `GitLabServicePathTest` | findAllJavaPathsByName |
+| `FileSourceServiceTest` | resolve по index |
+| + существующие parser/context тесты |

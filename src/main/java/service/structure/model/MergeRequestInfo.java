@@ -17,6 +17,7 @@ import java.util.List;
  * @param commits        список коммитов
  * @param changedFiles   пути к не-удалённым .java-файлам MR (для уровня 0)
  * @param diffs          полный список diff-записей MR (для построения индекса)
+ * @param pinnedRefs     зафиксированные SHA (при создании сессии)
  */
 public record MergeRequestInfo(
         Long iid,
@@ -27,5 +28,21 @@ public record MergeRequestInfo(
         String authorUsername,
         List<CommitInfo> commits,
         List<String> changedFiles,
-        @JsonIgnore List<Diff> diffs
-) {}
+        @JsonIgnore List<Diff> diffs,
+        PinnedRefs pinnedRefs
+) {
+    /** Конструктор без pin SHA (legacy / тесты). */
+    public MergeRequestInfo(
+            Long iid,
+            String title,
+            String state,
+            String sourceBranch,
+            String targetBranch,
+            String authorUsername,
+            List<CommitInfo> commits,
+            List<String> changedFiles,
+            List<Diff> diffs) {
+        this(iid, title, state, sourceBranch, targetBranch, authorUsername,
+                commits, changedFiles, diffs, null);
+    }
+}

@@ -6,63 +6,60 @@ import lombok.extern.slf4j.Slf4j;
 import org.gitlab4j.api.GitLabApi;
 import org.gitlab4j.api.GitLabApiException;
 import org.gitlab4j.api.models.Diff;
+import org.gitlab4j.api.models.DiffRefs;
 import org.gitlab4j.api.models.MergeRequest;
 import org.gitlab4j.api.models.RepositoryFile;
 import org.gitlab4j.api.models.TreeItem;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import service.structure.exception.DiffRefsNotReadyException;
 import service.structure.model.CommitInfo;
 import service.structure.model.MergeRequestInfo;
+import service.structure.model.PinnedRefs;
 
 import java.util.*;
 
 /**
  * Взаимодействие с GitLab через gitlab4j-api.
- *
- * <h2>Файловый индекс для резолвинга зависимостей</h2>
- * <p>Мёрженный индекс строится на основе <b>target-ветки</b> (один запрос
- * {@code repository/tree?recursive=true}) с последующим наложением
- * патча из diff MR:
- * <ul>
- *   <li>Добавленные файлы ({@code newFile=true}) — добавляются в индекс.</li>
- *   <li>Удалённые файлы ({@code deletedFile=true}) — остаются в индексе
- *       (намеренно: позволяет резолвить типы, которые удалены в source,
- *       но на которые всё ещё есть ссылки).</li>
- *   <li>Переименованные ({@code renamedFile=true}) — добавляется {@code newPath};
- *       {@code oldPath} остаётся из target-индекса.</li>
- *   <li>Изменённые — путь не меняется, индекс не трогается.</li>
- * </ul>
- *
- * <h2>Кэш индекса</h2>
- * <p>Равный индекс ({@link #buildRawIndex}) кэшируется в {@code fileIndexCache}
- * по ключу {@code "gitlabUrl::projectId::branch"} с TTL
- * {@code expireAfterAccess}. Мёрженный индекс ({@link #buildMergedFileIndex})
- * не кэшируется: его наложение патча специфично для MR и строится
- * быстро поверх кэшированного raw-индекса.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class GitLabService {
 
-    /**
-     * Кэш raw-индексов: ключ = {@code "gitlabUrl::projectId::branch"},
-     * значение = {@code Map<simpleName.java, List<fullPath>>}.
-     */
     private final Cache<String, Map<String, List<String>>> fileIndexCache;
+
+    @Value("${app.review-session.diff-refs-retry-attempts:3}")
+    private int diffRefsRetryAttempts;
+
+    @Value("${app.review-session.diff-refs-retry-delay-ms:500}")
+    private long diffRefsRetryDelayMs;
 
     private static final List<String> BUILD_FILE_SUFFIXES = List.of(".gradle", ".gradle.kts");
     private static final String POM_XML = "pom.xml";
     private static final String CACHE_KEY_SEPARATOR = "::";
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
+    /** Снимок MR при создании сессии: метаданные + pin SHA. */
+    public record MergeRequestSnapshot(MergeRequestInfo mrInfo, PinnedRefs pinnedRefs) {}
 
-    public MergeRequestInfo getMergeRequestInfo(String gitlabUrl, String token,
-                                                String projectId, long mrIid) {
+    /**
+     * Получает MR, diff и {@code diff_refs} с retry.
+     * Используется только при create сессии.
+     */
+    public MergeRequestSnapshot getMergeRequestSnapshot(String gitlabUrl, String token,
+                                                        String projectId, long mrIid) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
-            MergeRequest mr = api.getMergeRequestApi()
-                    .getMergeRequest(projectId, mrIid);
+            MergeRequest mr = fetchMergeRequestWithDiffRefs(api, projectId, mrIid);
+            DiffRefs refs = mr.getDiffRefs();
+            if (refs == null
+                    || refs.getHeadSha() == null
+                    || refs.getStartSha() == null
+                    || refs.getBaseSha() == null) {
+                throw new DiffRefsNotReadyException(mrIid);
+            }
+
+            PinnedRefs pinned = new PinnedRefs(
+                    refs.getHeadSha(), refs.getStartSha(), refs.getBaseSha());
 
             List<CommitInfo> commits = api.getMergeRequestApi()
                     .getCommits(projectId, mrIid)
@@ -86,7 +83,7 @@ public class GitLabService {
                     .filter(p -> p.endsWith(".java"))
                     .toList();
 
-            return new MergeRequestInfo(
+            MergeRequestInfo mrInfo = new MergeRequestInfo(
                     mr.getIid(),
                     mr.getTitle(),
                     mr.getState() != null ? mr.getState().toString() : null,
@@ -95,28 +92,58 @@ public class GitLabService {
                     mr.getAuthor() != null ? mr.getAuthor().getUsername() : null,
                     commits,
                     changedFiles,
-                    diffs
+                    diffs,
+                    pinned
             );
+            return new MergeRequestSnapshot(mrInfo, pinned);
         } catch (GitLabApiException e) {
             throw new RuntimeException("GitLab API error: " + e.getMessage(), e);
         }
     }
 
+    private MergeRequest fetchMergeRequestWithDiffRefs(GitLabApi api, String projectId, long mrIid)
+            throws GitLabApiException {
+        GitLabApiException last = null;
+        for (int attempt = 1; attempt <= diffRefsRetryAttempts; attempt++) {
+            MergeRequest mr = api.getMergeRequestApi().getMergeRequest(projectId, mrIid);
+            DiffRefs refs = mr.getDiffRefs();
+            if (refs != null
+                    && refs.getHeadSha() != null
+                    && refs.getStartSha() != null
+                    && refs.getBaseSha() != null) {
+                return mr;
+            }
+            if (attempt < diffRefsRetryAttempts) {
+                log.debug("diff_refs not ready for MR !{}, retry {}/{}",
+                        mrIid, attempt, diffRefsRetryAttempts);
+                try {
+                    Thread.sleep(diffRefsRetryDelayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted waiting for diff_refs", e);
+                }
+            } else {
+                last = new GitLabApiException("diff_refs not ready");
+            }
+        }
+        throw last != null ? last : new GitLabApiException("diff_refs not ready");
+    }
+
     public Optional<String> readFileContent(String gitlabUrl, String token, String projectId,
-                                            String branch, String filePath) {
+                                            String ref, String filePath) {
         if (!filePath.endsWith(".java")) {
             return Optional.empty();
         }
-        return readRawFileContent(gitlabUrl, token, projectId, branch, filePath);
+        return readRawFileContent(gitlabUrl, token, projectId, ref, filePath);
     }
 
     public Optional<String> readRawFileContent(String gitlabUrl, String token, String projectId,
-                                               String branch, String filePath) {
+                                               String ref, String filePath) {
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             RepositoryFile file = api.getRepositoryFileApi()
-                    .getFile(projectId, filePath, branch);
+                    .getFile(projectId, filePath, ref);
             String content = new String(
-                    java.util.Base64.getDecoder().decode(file.getContent()));
+                    Base64.getDecoder().decode(file.getContent()));
             return Optional.of(content);
         } catch (GitLabApiException e) {
             if (e.getHttpStatus() == 404) {
@@ -140,11 +167,11 @@ public class GitLabService {
     }
 
     public Map<String, List<String>> buildMergedFileIndex(String gitlabUrl, String token,
-                                                          String projectId, String targetBranch,
+                                                          String projectId, String targetRef,
                                                           List<Diff> mrDiffs) {
-        log.info("Building merged file index for project={} targetBranch={}", projectId, targetBranch);
+        log.info("Building merged file index for project={} targetRef={}", projectId, targetRef);
 
-        Map<String, List<String>> index = new HashMap<>(buildRawIndex(gitlabUrl, token, projectId, targetBranch));
+        Map<String, List<String>> index = new HashMap<>(buildRawIndex(gitlabUrl, token, projectId, targetRef));
 
         for (Diff diff : mrDiffs) {
             String path = diff.getNewPath();
@@ -164,41 +191,52 @@ public class GitLabService {
 
     public Optional<String> findJavaFileByQualifiedName(Map<String, List<String>> fileIndex,
                                                         String qualifiedName) {
-        String simpleName = qualifiedName.contains(".")
-                ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
-                : qualifiedName;
-        if (simpleName.contains("$")) {
-            simpleName = simpleName.substring(0, simpleName.indexOf('$'));
-        }
-        String fileName = simpleName + ".java";
-
-        List<String> candidates = fileIndex.getOrDefault(fileName, List.of());
-        if (candidates.isEmpty()) {
-            log.debug("No file found in merged index for class: {}", qualifiedName);
-            return Optional.empty();
-        }
-
-        if (candidates.size() == 1) {
-            return Optional.of(candidates.get(0));
-        }
-
-        String packageSuffix = qualifiedName.replace('.', '/') + ".java";
-        Optional<String> exact = candidates.stream()
-                .filter(path -> path.endsWith(packageSuffix))
-                .findFirst();
-        if (exact.isPresent()) return exact;
-
-        Optional<String> mainFirst = candidates.stream()
-                .filter(p -> p.contains("src/main/java"))
-                .findFirst();
-        return mainFirst.isPresent() ? mainFirst : Optional.of(candidates.get(0));
+        List<String> all = findAllJavaPathsByName(fileIndex, qualifiedName, true);
+        return all.isEmpty() ? Optional.empty() : Optional.of(all.get(0));
     }
 
     /**
-     * Все пути к {@code .java}-файлам в указанном пакете (по merged/raw-индексу).
-     * Нужен для package-private top-level типов, живущих в файле с другим именем
-     * (например {@code class B {}} в {@code A.java}).
+     * Все пути в индексе, соответствующие simple или qualified имени.
+     *
+     * @param qualifiedMode true — фильтр по package suffix; false — все пути с данным simple name
      */
+    public List<String> findAllJavaPathsByName(Map<String, List<String>> fileIndex,
+                                               String name,
+                                               boolean qualifiedMode) {
+        String normalized = normalizeName(name);
+        boolean isQualified = normalized.contains(".");
+        String simpleName = isQualified
+                ? normalized.substring(normalized.lastIndexOf('.') + 1)
+                : normalized;
+        if (simpleName.contains("$")) {
+            simpleName = simpleName.substring(0, simpleName.indexOf('$'));
+        }
+        String fileKey = simpleName + ".java";
+        List<String> candidates = new ArrayList<>(fileIndex.getOrDefault(fileKey, List.of()));
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        if (!qualifiedMode || !isQualified) {
+            candidates.sort(String::compareTo);
+            return List.copyOf(candidates);
+        }
+        String packageSuffix = normalized.replace('.', '/') + ".java";
+        List<String> filtered = candidates.stream()
+                .filter(path -> path.endsWith(packageSuffix))
+                .sorted()
+                .toList();
+        return List.copyOf(filtered);
+    }
+
+    /** Убирает пробелы и суффикс {@code .java} из имени класса/файла. */
+    public static String normalizeName(String name) {
+        String n = name.trim();
+        if (n.endsWith(".java")) {
+            n = n.substring(0, n.length() - 5);
+        }
+        return n;
+    }
+
     public List<String> listJavaFilesInPackage(Map<String, List<String>> fileIndex, String packageName) {
         if (packageName == null || packageName.isBlank()) {
             return List.of();
@@ -218,27 +256,21 @@ public class GitLabService {
         return paths;
     }
 
-    /**
-     * Строит raw-индекс для ветки, используя кэш.
-     *
-     * <p>При попадании — возвращает из кэша без запроса к GitLab.
-     * При промахе — запрашивает полное дерево и сохраняет в кэш.
-     */
     public Map<String, List<String>> buildRawIndex(String gitlabUrl, String token,
-                                                    String projectId, String branch) {
-        String cacheKey = gitlabUrl + CACHE_KEY_SEPARATOR + projectId + CACHE_KEY_SEPARATOR + branch;
+                                                    String projectId, String ref) {
+        String cacheKey = gitlabUrl + CACHE_KEY_SEPARATOR + projectId + CACHE_KEY_SEPARATOR + ref;
         Map<String, List<String>> cached = fileIndexCache.getIfPresent(cacheKey);
         if (cached != null) {
-            log.debug("File index cache hit: project={} branch={}", projectId, branch);
+            log.debug("File index cache hit: project={} ref={}", projectId, ref);
             return cached;
         }
 
-        log.info("Building raw file index for project={} branch={}", projectId, branch);
+        log.info("Building raw file index for project={} ref={}", projectId, ref);
         Map<String, List<String>> index = new HashMap<>();
 
         try (GitLabApi api = new GitLabApi(gitlabUrl, token)) {
             List<TreeItem> tree = api.getRepositoryApi()
-                    .getTree(projectId, null, null, true);
+                    .getTree(projectId, null, ref, true);
             for (TreeItem item : tree) {
                 if (item.getType() == TreeItem.Type.BLOB) {
                     String path = item.getPath();
@@ -255,14 +287,27 @@ public class GitLabService {
 
         Map<String, List<String>> unmodifiable = Collections.unmodifiableMap(index);
         fileIndexCache.put(cacheKey, unmodifiable);
-        log.info("Raw file index cached: {} unique filenames, project={} branch={}",
-                index.size(), projectId, branch);
+        log.info("Raw file index cached: {} unique filenames, project={} ref={}",
+                index.size(), projectId, ref);
         return unmodifiable;
     }
 
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
+    /** Строит qualified name из пути {@code src/.../java/.../Foo.java}. */
+    public static String qualifiedNameFromRepoPath(String filePath) {
+        String relative = pathAfterJavaSourceRoot(filePath);
+        if (relative == null || !relative.endsWith(".java")) {
+            return null;
+        }
+        String withoutExt = relative.substring(0, relative.length() - 5);
+        return withoutExt.replace('/', '.');
+    }
+
+    /** Метка модуля для repo-файла: {@code src/main} или {@code src/test}. */
+    public static String repoModuleLabel(String filePath) {
+        if (filePath.startsWith("src/test/")) return "src/test";
+        if (filePath.startsWith("src/main/")) return "src/main";
+        return "src/main";
+    }
 
     private boolean isBuildFile(String name) {
         if (POM_XML.equals(name)) return true;
@@ -277,7 +322,6 @@ public class GitLabService {
         return slash < 0 ? path : path.substring(slash + 1);
     }
 
-    /** Путь относительно {@code src/.../java/} или {@code null}, если это не Java-исходник. */
     static String pathAfterJavaSourceRoot(String filePath) {
         for (String prefix : List.of("src/main/java/", "src/test/java/", "src/main/kotlin/")) {
             int idx = filePath.indexOf(prefix);

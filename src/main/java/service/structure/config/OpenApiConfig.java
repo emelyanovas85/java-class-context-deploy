@@ -21,11 +21,12 @@ public class OpenApiConfig {
                         .description("""
                                 Сервис анализа структуры Java-классов по мёрж-реквесту GitLab.
 
-                                Возвращает сигнатуры классов (поля, методы, вложенные классы,
-                                аннотации) для всех файлов, изменённых в MR, с заданной
-                                глубиной контекста зависимостей.
+                                **Flow:** POST /api/review-sessions → work-запросы с sessionId
+                                → DELETE /api/review-sessions.
+
+                                Группы API: **Sessions**, **Structure**, **Sources**.
                                 """)
-                        .version("1.0.0")
+                        .version("2.0.0")
                         .contact(new Contact()
                                 .name("java-class-context")
                                 .url("https://github.com/KalininAY/java-class-context"))

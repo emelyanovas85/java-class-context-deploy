@@ -75,7 +75,7 @@ public class DependencyContextService {
      * @param gitlabUrl URL GitLab-инстанса
      * @param token     токен доступа
      * @param projectId идентификатор проекта
-     * @param branch    ветка (source branch из MR)
+     * @param branch    ref (ветка или SHA source-снимка MR)
      * @param fileIndex мёрженный файловый индекс (имя → пути), построенный в buildContext()
      * @return карта qualified name → путь к jar (может быть пустой)
      */

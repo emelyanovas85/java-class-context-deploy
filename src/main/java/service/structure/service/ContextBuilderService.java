@@ -7,8 +7,11 @@ import service.structure.cache.ClassContextParseCache;
 import service.structure.cache.ParseCacheEntry;
 import service.structure.dependency.DependencyClassNameExtractor;
 import service.structure.dependency.DependencyCoordinate;
-import service.structure.exception.MergeRequestAlreadyMergedException;
+import service.structure.exception.ReviewSessionTerminatedException;
 import service.structure.model.*;
+import service.structure.session.ReviewSession;
+import service.structure.session.ReviewSessionCancellation;
+import service.structure.session.ReviewSessionService;
 import service.structure.parser.JavaSourceParseService;
 import service.structure.parser.JavaStructureParser;
 import service.structure.parser.ParsedJavaFile;
@@ -56,32 +59,30 @@ import java.util.stream.Collectors;
 @Service
 public class ContextBuilderService {
 
-    private static final Set<String> ANALYZABLE_STATES = Set.of("opened", "locked");
-
     private final GitLabService gitLabService;
     private final JavaStructureParser structureParser;
     private final StructureNodeMapper nodeMapper;
     private final JavaSourceParseService sourceParseService;
-    private final DependencyContextService dependencyContextService;
     private final DependencyClassNameExtractor classNameExtractor;
     private final ClassContextParseCache parseCache;
+    private final ReviewSessionService reviewSessionService;
     private final ExecutorService ioExecutor;
 
     public ContextBuilderService(GitLabService gitLabService,
                                  JavaStructureParser structureParser,
                                  StructureNodeMapper nodeMapper,
                                  JavaSourceParseService sourceParseService,
-                                 DependencyContextService dependencyContextService,
                                  DependencyClassNameExtractor classNameExtractor,
                                  ClassContextParseCache parseCache,
+                                 ReviewSessionService reviewSessionService,
                                  @Qualifier("ioExecutor") ExecutorService ioExecutor) {
         this.gitLabService = gitLabService;
         this.structureParser = structureParser;
         this.nodeMapper = nodeMapper;
         this.sourceParseService = sourceParseService;
-        this.dependencyContextService = dependencyContextService;
         this.classNameExtractor = classNameExtractor;
         this.parseCache = parseCache;
+        this.reviewSessionService = reviewSessionService;
         this.ioExecutor = ioExecutor;
     }
 
@@ -107,40 +108,32 @@ public class ContextBuilderService {
 
     // ── buildContext ─────────────────────────────────────────────────────────────────
 
-    public ContextResponse buildContext(ContextRequest request) {
+    /**
+     * Строит контекст по frozen-снимку сессии (pin SHA, merged index).
+     * Поддерживает отмену через {@link service.structure.session.ReviewSessionCancellation}.
+     */
+    public ContextResponse buildContext(ReviewSession session) {
+        session.cancellation().throwIfTerminated();
         try (var ignored = parseCache.beginScope()) {
-            return buildContextInternal(request);
+            Map<String, Path> dependencySources =
+                    reviewSessionService.getOrBuildDependencySources(session);
+            if (!dependencySources.isEmpty()) {
+                log.info("Dependency context: {} known external class names",
+                        dependencySources.size());
+            }
+            return buildContextInternal(session, dependencySources);
         }
     }
 
-    private ContextResponse buildContextInternal(ContextRequest request) {
-        MergeRequestInfo mrInfo = gitLabService.getMergeRequestInfo(
-                request.gitlabUrl(), request.token(),
-                request.projectId(), request.mergeRequestIid());
+    private ContextResponse buildContextInternal(ReviewSession session,
+                                                 Map<String, Path> dependencySources) {
+        MergeRequestInfo mrInfo = session.mrInfo();
+        ReviewSessionCancellation cancellation = session.cancellation();
+        String sourceRef = session.sourceSha();
+        String targetRef = session.targetSha();
+        int depth = session.depth();
 
-        if (!ANALYZABLE_STATES.contains(mrInfo.state())) {
-            throw new MergeRequestAlreadyMergedException(
-                    request.mergeRequestIid(), mrInfo.state());
-        }
-
-        String sourceBranch = mrInfo.sourceBranch();
-        String targetBranch = mrInfo.targetBranch();
-
-        Map<String, List<String>> fileIndex = gitLabService.buildMergedFileIndex(
-                request.gitlabUrl(), request.token(),
-                request.projectId(), targetBranch, mrInfo.diffs());
-
-        // При depth=0 зависимости не нужны — пропускаем дорогой сбор
-        Map<String, Path> dependencySources;
-        if (request.depth() == 0) {
-            log.info("depth=0: skipping dependency sources collection");
-            dependencySources = Map.of();
-        } else {
-            dependencySources = dependencyContextService.collectDependencySources(
-                    request.gitlabUrl(), request.token(),
-                    request.projectId(), sourceBranch, fileIndex);
-            log.info("Dependency context: {} known external class names", dependencySources.size());
-        }
+        Map<String, List<String>> fileIndex = session.mergedFileIndex();
 
         BiFunction<String, List<String>, Optional<String>> wildcardResolver =
                 buildWildcardResolver(fileIndex, dependencySources);
@@ -157,15 +150,16 @@ public class ContextBuilderService {
         AtomicInteger totalSkipped   = new AtomicInteger(0);
 
         // ── Уровень 0 ─────────────────────────────────────────────────────────────────
+        cancellation.throwIfTerminated();
         List<CompletableFuture<Level0Result>> level0Futures = mrInfo.changedFiles().stream()
-                .map(filePath -> CompletableFuture.supplyAsync(() -> {
+                .map(filePath -> cancellation.supplyAsync(() -> {
                     log.debug("Level 0 [parallel]: fetch+parse {}", filePath);
                     Optional<String> src = gitLabService.readFileContent(
-                            request.gitlabUrl(), request.token(),
-                            request.projectId(), sourceBranch, filePath);
+                            session.gitlabUrl(), session.token(),
+                            session.projectId(), sourceRef, filePath);
                     Optional<String> tgt = gitLabService.readFileContent(
-                            request.gitlabUrl(), request.token(),
-                            request.projectId(), targetBranch, filePath);
+                            session.gitlabUrl(), session.token(),
+                            session.projectId(), targetRef, filePath);
                     ParsedJavaFile srcFile = src
                             .map(s -> sourceParseService.parse(s, filePath, 0, wildcardResolver))
                             .orElse(ParsedJavaFile.empty());
@@ -178,7 +172,7 @@ public class ContextBuilderService {
                 .toList();
 
         List<ClassStructure> level0 = new ArrayList<>();
-        for (Level0Result r : awaitAll(level0Futures)) {
+        for (Level0Result r : awaitAll(level0Futures, cancellation)) {
             if (r.sourceContent().isPresent() && r.targetContent().isEmpty())
                 log.debug("{} exists only in source branch (just created)", r.filePath());
             if (r.sourceContent().isEmpty() && r.targetContent().isPresent())
@@ -206,7 +200,7 @@ public class ContextBuilderService {
         }
 
         // ── Ранний возврат при depth=0 ────────────────────────────────────────────────
-        if (request.depth() == 0) {
+        if (depth == 0) {
             log.info("depth=0: returning level-0 context only ({} classes from {} changed files)",
                     allContexts.size(), mrInfo.changedFiles().size());
             List<ClassContext> resultContexts0 =
@@ -219,7 +213,7 @@ public class ContextBuilderService {
         List<ClassStructure> currentLevel = level0;
         List<ClassStructure> allParsed = new ArrayList<>(level0);
 
-        for (int depth = 1; depth <= request.depth(); depth++) {
+        for (int currentLevelDepth = 1; currentLevelDepth <= depth; currentLevelDepth++) {
             Map<String, Set<Integer>> refToCallerIds =
                     collectRefToCallerIds(currentLevel, processedQNames, qNameToId);
             Map<Integer, String> idToQn = invertQNameToId(qNameToId);
@@ -232,22 +226,23 @@ public class ContextBuilderService {
             if (wave.isEmpty()) break;
 
             log.debug("Depth {}: resolving {} types in parallel ({} inline nested skipped)",
-                    depth, wave.size(), partition.internalNestedSkipped().size());
+                    currentLevelDepth, wave.size(), partition.internalNestedSkipped().size());
             processedQNames.addAll(wave);
 
-            final int currentDepth = depth;
+            cancellation.throwIfTerminated();
+            final int waveDepth = currentLevelDepth;
             List<CompletableFuture<DepthResult>> futures = wave.stream()
-                    .map(qName -> CompletableFuture.supplyAsync(
+                    .map(qName -> cancellation.supplyAsync(
                             () -> fetchAndParse(qName,
                                     refToCallerIds.getOrDefault(qName, Set.of()),
                                     fileIndex, dependencySources, wildcardResolver,
-                                    request, sourceBranch, currentDepth,
+                                    session, sourceRef, waveDepth,
                                     totalRequested, totalResolved, totalSkipped),
                             ioExecutor))
                     .toList();
 
             List<ClassStructure> nextLevel = new ArrayList<>();
-            for (DepthResult r : mergeResults(awaitAll(futures))) {
+            for (DepthResult r : mergeResults(awaitAll(futures, cancellation))) {
                 registerDepthResult(r, qNameToId, idCounter, allContexts, nextLevel, nestedToRootTopLevel);
             }
 
@@ -278,18 +273,19 @@ public class ContextBuilderService {
                     finalWave.size(), finalPartition.internalNestedSkipped().size());
             processedQNames.addAll(finalWave);
 
+            cancellation.throwIfTerminated();
             List<CompletableFuture<DepthResult>> finalFutures = finalWave.stream()
-                    .map(qName -> CompletableFuture.supplyAsync(
+                    .map(qName -> cancellation.supplyAsync(
                             () -> fetchAndParse(qName,
                                     finalRefToCallerIds.getOrDefault(qName, Set.of()),
                                     fileIndex, dependencySources, wildcardResolver,
-                                    request, sourceBranch, request.depth(),
+                                    session, sourceRef, depth,
                                     totalRequested, totalResolved, totalSkipped),
                             ioExecutor))
                     .toList();
 
             List<ClassStructure> finalLevel = new ArrayList<>();
-            for (DepthResult r : mergeResults(awaitAll(finalFutures))) {
+            for (DepthResult r : mergeResults(awaitAll(finalFutures, cancellation))) {
                 registerDepthResult(r, qNameToId, idCounter, allContexts, finalLevel, nestedToRootTopLevel);
             }
             allParsed.addAll(finalLevel);
@@ -324,7 +320,7 @@ public class ContextBuilderService {
                 enrichAndFilterContexts(allContexts, allParsed, qNameToId, nestedToRootTopLevel);
         List<FileContext> resultFiles = groupContextsByFile(resultContexts, allParsed);
         int totalClasses = resultContexts.size();
-        return new ContextResponse(mrInfo, resultFiles, request.depth(), totalClasses);
+        return new ContextResponse(mrInfo, resultFiles, depth, totalClasses);
     }
 
     // ── mergeResults ────────────────────────────────────────────────────────────────
@@ -788,8 +784,8 @@ public class ContextBuilderService {
             Map<String, List<String>> fileIndex,
             Map<String, Path> dependencySources,
             BiFunction<String, List<String>, Optional<String>> wildcardResolver,
-            ContextRequest request,
-            String sourceBranch,
+            ReviewSession session,
+            String sourceRef,
             int depth,
             AtomicInteger totalRequested,
             AtomicInteger totalResolved,
@@ -830,7 +826,7 @@ public class ContextBuilderService {
         // 2. Repo — кэш до HTTP, если путь известен из индекса
         Optional<DepthResult> repoResult = fetchFromRepo(
                 qName, callerIds, depth, fileIndex, wildcardResolver,
-                request.gitlabUrl(), request.token(), request.projectId(), sourceBranch);
+                session.gitlabUrl(), session.token(), session.projectId(), sourceRef);
         if (repoResult.isPresent()) {
             totalResolved.incrementAndGet();
             return repoResult.get();
@@ -959,16 +955,26 @@ public class ContextBuilderService {
 
     // ── awaitAll ────────────────────────────────────────────────────────────────────
 
-    private <T> List<T> awaitAll(List<CompletableFuture<T>> futures) {
+    private <T> List<T> awaitAll(List<CompletableFuture<T>> futures,
+                                 ReviewSessionCancellation cancellation) {
         List<T> results = new ArrayList<>(futures.size());
         for (CompletableFuture<T> f : futures) {
+            cancellation.throwIfTerminated();
             try {
                 results.add(f.get());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while awaiting async task", e);
+                cancellation.throwIfTerminated();
+                throw new ReviewSessionTerminatedException(cancellation.sessionId());
+            } catch (java.util.concurrent.CancellationException e) {
+                cancellation.throwIfTerminated();
+                throw new ReviewSessionTerminatedException(cancellation.sessionId());
             } catch (ExecutionException e) {
-                log.warn("Async task failed", e.getCause());
+                Throwable cause = e.getCause();
+                if (cause instanceof ReviewSessionTerminatedException terminated) {
+                    throw terminated;
+                }
+                log.warn("Async task failed", cause);
                 results.add(null);
             }
         }

@@ -7,7 +7,10 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import service.structure.exception.DiffRefsNotReadyException;
 import service.structure.exception.MergeRequestAlreadyMergedException;
+import service.structure.exception.ReviewSessionNotFoundException;
+import service.structure.exception.ReviewSessionTerminatedException;
 
 import java.util.stream.Collectors;
 
@@ -25,12 +28,41 @@ public class GlobalExceptionHandler {
         return pd;
     }
 
+    /** HTTP 404 — сессия не найдена или TTL. */
+    @ExceptionHandler(ReviewSessionNotFoundException.class)
+    public ProblemDetail handleSessionNotFound(ReviewSessionNotFoundException ex) {
+        log.warn(ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setTitle("Review session not found");
+        pd.setProperty("code", "SESSION_NOT_FOUND");
+        return pd;
+    }
+
+    /** HTTP 410 — сессия терминирована. */
+    @ExceptionHandler(ReviewSessionTerminatedException.class)
+    public ProblemDetail handleSessionTerminated(ReviewSessionTerminatedException ex) {
+        log.warn(ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.GONE, ex.getMessage());
+        pd.setTitle("Review session terminated");
+        pd.setProperty("code", "SESSION_TERMINATED");
+        return pd;
+    }
+
     @ExceptionHandler(MergeRequestAlreadyMergedException.class)
     public ProblemDetail handleMerged(MergeRequestAlreadyMergedException ex) {
         log.warn(ex.getMessage());
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
                 HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
         pd.setTitle("Merge request already merged");
+        return pd;
+    }
+
+    /** HTTP 503 — {@code diff_refs} ещё не готов у GitLab. */
+    @ExceptionHandler(DiffRefsNotReadyException.class)
+    public ProblemDetail handleDiffRefsNotReady(DiffRefsNotReadyException ex) {
+        log.warn(ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+        pd.setTitle("diff_refs not ready");
         return pd;
     }
 
