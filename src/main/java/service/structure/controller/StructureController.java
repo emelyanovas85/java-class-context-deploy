@@ -64,7 +64,8 @@ public class StructureController {
             @ApiResponse(responseCode = "200", description = "Контекст построен"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована во время построения"),
-            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены в repo/jar")
+            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены в repo/jar"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping("/context")
     public ResponseEntity<ContextResponse> getContext(@Valid @RequestBody SessionRequest request) {
@@ -91,7 +92,8 @@ public class StructureController {
             @ApiResponse(responseCode = "200", description = "HTML-страница"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены")
+            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping(value = "/context/html", produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> getContextHtml(@Valid @RequestBody SessionRequest request) {
@@ -117,7 +119,8 @@ public class StructureController {
             @ApiResponse(responseCode = "200", description = "Массив markdown-строк"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены")
+            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping("/context/markdown")
     public ResponseEntity<List<String>> getContextMarkdown(@Valid @RequestBody SessionRequest request) {
@@ -144,7 +147,8 @@ public class StructureController {
             @ApiResponse(responseCode = "200", description = "Диаграмма в JSON-обёртке"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены")
+            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping("/plantuml")
     public ResponseEntity<PlantUmlResponse> getPlantUml(@Valid @RequestBody PlantUmlSessionRequest request) {
@@ -173,7 +177,8 @@ public class StructureController {
             @ApiResponse(responseCode = "200", description = "Текст PlantUML"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены")
+            @ApiResponse(responseCode = "400", description = "Валидация или names не найдены"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping(value = "/plantuml/text", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> getPlantUmlText(@Valid @RequestBody PlantUmlSessionRequest request) {

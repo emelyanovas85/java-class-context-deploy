@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import service.structure.exception.DiffRefsNotReadyException;
 import service.structure.exception.MergeRequestAlreadyMergedException;
+import service.structure.exception.ReviewSessionIndexBuildException;
 import service.structure.exception.ReviewSessionNotFoundException;
 import service.structure.exception.ReviewSessionTerminatedException;
 import service.structure.exception.SeedFilesNotFoundException;
@@ -36,6 +37,16 @@ public class GlobalExceptionHandler {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         pd.setTitle("Review session not found");
         pd.setProperty("code", "SESSION_NOT_FOUND");
+        return pd;
+    }
+
+    /** HTTP 503 — фоновое построение merged index не удалось. */
+    @ExceptionHandler(ReviewSessionIndexBuildException.class)
+    public ProblemDetail handleIndexBuildFailed(ReviewSessionIndexBuildException ex) {
+        log.warn(ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+        pd.setTitle("Session file index build failed");
+        pd.setProperty("code", "SESSION_INDEX_BUILD_FAILED");
         return pd;
     }
 

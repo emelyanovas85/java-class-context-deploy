@@ -36,15 +36,16 @@ public class ReviewSessionController {
             description = """
                     Первый шаг интеграции. Загружает MR из GitLab, фиксирует коммиты и строит merged file index.
 
-                    **Возвращает:** короткий `sessionId` (8 символов), `sourceSha`, `targetSha`, `baseSha`, `expiresAt`.
+                    **Возвращает сразу** после pin SHA и снимка MR: `sessionId`, `sourceSha`, `targetSha`, `baseSha`, `expiresAt`.
+                    Построение merged file index идёт **в фоне** — не блокирует ответ.
 
-                    **Повторный вызов** для того же MR (тот же `gitlabUrl` + `projectId` + `mergeRequestIid`)
-                    автоматически терминирует предыдущую сессию.
+                    Structure/Sources-запросы автоматически **ждут** готовности индекса (join).
 
-                    Параметры `depth` и `names` здесь **не передаются** — они задаются на Structure-эндпоинтах.
+                    **Повторный вызов** для того же MR терминирует предыдущую сессию.
+                    `depth` и `names` задаются на Structure-эндпоинтах.
                     """)
     @ApiResponses({
-            @ApiResponse(responseCode = "201", description = "Сессия создана"),
+            @ApiResponse(responseCode = "201", description = "Сессия создана (индекс строится в фоне)"),
             @ApiResponse(responseCode = "422", description = "MR уже merged/closed — анализ невозможен"),
             @ApiResponse(responseCode = "503", description = "GitLab ещё не заполнил diff_refs для MR"),
             @ApiResponse(responseCode = "400", description = "Ошибка валидации тела запроса")

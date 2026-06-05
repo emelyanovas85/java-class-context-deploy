@@ -6,7 +6,7 @@
 
 ## Что делает сервис
 
-1. **Создаёт сессию ревью** (`POST /api/review-sessions`): один раз получает MR, фиксирует `sourceSha` / `targetSha` / `baseSha` и снимок diff.
+1. **Создаёт сессию ревью** (`POST /api/review-sessions`): pin SHA и снимок MR; ответ сразу с `sessionId`. Merged file index строится в фоне.
 2. **Work-запросы** с `sessionId` в теле: контекст, PlantUML, исходники — без повторной передачи GitLab credentials.
 3. **Терминирует сессию** (`DELETE /api/review-sessions`): отменяет in-flight задачи и удаляет данные из store.
 4. Парсит изменённые файлы на **зафиксированных SHA** (source/target) через **JavaParser** и сравнивает структуры.

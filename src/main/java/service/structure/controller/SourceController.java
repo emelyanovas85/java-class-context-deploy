@@ -54,7 +54,8 @@ public class SourceController {
             @ApiResponse(responseCode = "200", description = "Строки по каждому классу (или error в элементе)"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Ошибка валидации")
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping("/source-lines/gitlab")
     public ResponseEntity<SourceLinesResponse> getGitLabLines(
@@ -99,7 +100,8 @@ public class SourceController {
             @ApiResponse(responseCode = "200", description = "Совпадения по каждому имени (может быть пустой files)"),
             @ApiResponse(responseCode = "404", description = "Сессия не найдена"),
             @ApiResponse(responseCode = "410", description = "Сессия терминирована"),
-            @ApiResponse(responseCode = "400", description = "Ошибка валидации")
+            @ApiResponse(responseCode = "400", description = "Ошибка валидации"),
+            @ApiResponse(responseCode = "503", description = "Фоновое построение file index не удалось")
     })
     @PostMapping("/source-file")
     public ResponseEntity<FileSourceResponse> getSourceFile(@Valid @RequestBody FileSourceRequest request) {

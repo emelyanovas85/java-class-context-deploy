@@ -23,8 +23,8 @@ public class OpenApiConfig {
 
                                 ## Быстрый старт
 
-                                1. **Sessions** → `POST /api/review-sessions` — один раз передать GitLab credentials и MR.
-                                   Получить `sessionId` и зафиксированные SHA.
+                                1. **Sessions** → `POST /api/review-sessions` — credentials и MR; ответ сразу с `sessionId`.
+                                   Merged file index строится в фоне; work-запросы ждут его готовности.
                                 2. **Structure** / **Sources** → все work-запросы только с `sessionId` (credentials не нужны).
                                 3. **Sessions** → `DELETE /api/review-sessions` — завершить сессию, когда MR обновился или работа закончена.
 
@@ -43,7 +43,7 @@ public class OpenApiConfig {
                                 | 410 | Сессия терминирована (в т.ч. во время построения) |
                                 | 400 | Валидация; `names` не найдены |
                                 | 422 | MR не `opened`/`locked` (только create) |
-                                | 503 | GitLab ещё не заполнил `diff_refs` (только create) |
+                                | 503 | `diff_refs` не готов (create); ошибка фонового построения индекса |
 
                                 Группы API: **Sessions**, **Structure**, **Sources**.
                                 """)

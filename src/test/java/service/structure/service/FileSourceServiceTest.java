@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -56,7 +57,8 @@ class FileSourceServiceTest {
                 List.of(), List.of(), List.of(), refs);
         return new ReviewSession(
                 "sess1234", "https://gitlab.com", "p", "token", 1L,
-                refs, mr, List.of(), index, Instant.now().plusSeconds(3600),
+                refs, mr, List.of(), CompletableFuture.completedFuture(index),
+                Instant.now().plusSeconds(3600),
                 new ReviewSessionCancellation("sess1234"));
     }
 }
