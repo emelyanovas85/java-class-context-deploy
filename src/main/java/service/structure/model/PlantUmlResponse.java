@@ -11,11 +11,21 @@ import io.swagger.v3.oas.annotations.media.Schema;
  * @param requestedDepth       запрошенная глубина контекста
  * @param totalClassesAnalyzed количество классов на диаграмме
  */
-@Schema(description = "PlantUML class diagram, построенная по контексту MR")
+@Schema(description = "PlantUML class diagram по контексту сессии")
 public record PlantUmlResponse(
+
+        @Schema(description = "Метаданные MR")
         MergeRequestInfo mergeRequest,
+
+        @Schema(description = "Текст диаграммы PlantUML (@startuml … @enduml)")
         String plantUml,
+
+        @Schema(description = "Применено форматирование pretty из запроса")
         boolean pretty,
+
+        @Schema(description = "Запрошенная depth", example = "2")
         int requestedDepth,
+
+        @Schema(description = "Число классов на диаграмме", example = "47")
         int totalClassesAnalyzed
 ) {}

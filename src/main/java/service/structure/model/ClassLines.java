@@ -9,17 +9,17 @@ import java.util.List;
 /**
  * Класс и диапазоны строк для {@code /api/source-lines/*}.
  */
-@Schema(description = "Класс и запрашиваемые диапазоны строк")
+@Schema(description = "Класс и диапазоны строк для /api/source-lines/*")
 public record ClassLines(
 
-        @Schema(description = "Qualified name класса", example = "com.example.Foo")
+        @Schema(description = "Qualified name класса в файле", example = "com.example.Foo")
         @NotBlank(message = "qualifiedName must not be blank")
         String qualifiedName,
 
-        @Schema(description = "Источник: main | test | null", example = "main", nullable = true)
+        @Schema(description = "Для GitLab: main или test — disambiguation при коллизии имён. Для jar: не используется", example = "main", nullable = true)
         String source,
 
-        @Schema(description = "Диапазоны строк", example = "[\"28-168\"]")
+        @Schema(description = "Диапазоны: одна строка \"17\" или включительный \"19-22\"", example = "[\"28-168\"]")
         @NotEmpty(message = "rows must not be empty")
         List<String> rows
 ) {

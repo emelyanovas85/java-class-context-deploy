@@ -19,10 +19,31 @@ public class OpenApiConfig {
                 .info(new Info()
                         .title("Java Class Context API")
                         .description("""
-                                Сервис анализа структуры Java-классов по мёрж-реквесту GitLab.
+                                Сервис структурного анализа Java-классов по **GitLab Merge Request** с сессией ревью и pin коммитов.
 
-                                **Flow:** POST /api/review-sessions → work-запросы с sessionId
-                                → DELETE /api/review-sessions.
+                                ## Быстрый старт
+
+                                1. **Sessions** → `POST /api/review-sessions` — один раз передать GitLab credentials и MR.
+                                   Получить `sessionId` и зафиксированные SHA.
+                                2. **Structure** / **Sources** → все work-запросы только с `sessionId` (credentials не нужны).
+                                3. **Sessions** → `DELETE /api/review-sessions` — завершить сессию, когда MR обновился или работа закончена.
+
+                                ## Параметры structure-запросов
+
+                                | Поле | Описание |
+                                |------|----------|
+                                | `depth` | `0` — только корневые файлы/классы; `N` — BFS по зависимостям на N уровней (repo + sources.jar) |
+                                | `names` | Опционально. Корни обхода: simple/qualified имя или `src/.../Foo.java`. Без поля — все **изменённые** `.java` в MR. Сначала repo-индекс, затем jar-зависимости |
+
+                                ## Коды ошибок
+
+                                | HTTP | Когда |
+                                |------|-------|
+                                | 404 | Сессия не найдена / истёк TTL |
+                                | 410 | Сессия терминирована (в т.ч. во время построения) |
+                                | 400 | Валидация; `names` не найдены |
+                                | 422 | MR не `opened`/`locked` (только create) |
+                                | 503 | GitLab ещё не заполнил `diff_refs` (только create) |
 
                                 Группы API: **Sessions**, **Structure**, **Sources**.
                                 """)
