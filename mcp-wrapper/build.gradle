@@ -1,0 +1,57 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.5'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'service.mcp'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    // Spring AI 1.0.0 GA — совместим со Spring Boot 3.4.x
+    springAiVersion = '1.0.0'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.ai:spring-ai-bom:${springAiVersion}"
+    }
+}
+
+dependencies {
+    // Spring Boot
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+    // Spring AI — MCP Server поверх Spring MVC (SSE / Streamable-HTTP транспорт)
+    implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
+
+    // Lombok
+    compileOnly 'org.projectlombok:lombok:1.18.36'
+    annotationProcessor 'org.projectlombok:lombok:1.18.36'
+
+    // Jackson (уже в spring-boot-starter-web, явно для ясности)
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Swagger UI / OpenAPI 3 — описание REST-обвязки самого MCP-сервера
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.8'
+
+    // Тесты
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testCompileOnly 'org.projectlombok:lombok:1.18.36'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.36'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

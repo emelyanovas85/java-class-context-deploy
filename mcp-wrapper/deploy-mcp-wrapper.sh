@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# =============================================================================
+# deploy-mcp-wrapper.sh — разворачивание java-class-context-mcp (MCP-обёртки)
+# на удалённой машине, по аналогии с deploy-java-class-context.sh основного сервиса.
+#
+# Обёртка — MCP-сервер (Spring AI, SSE-транспорт), который проксирует основной
+# сервис Java Class Context API. По умолчанию деплоится на 10.1.5.97:8086,
+# а обращается к основному сервису на 10.1.5.97:8084.
+#
+# Использование:
+#   ./deploy-mcp-wrapper.sh [ОПЦИИ]
+#
+# Опции:
+#   -h, --host        SSH-хост удалённой машины (по умолчанию: 10.1.5.97)
+#   -u, --user        SSH-пользователь (по умолчанию: svc-local-adm)
+#   -p, --port        SSH-порт (по умолчанию: 22)
+#   -i, --identity    Путь к приватному SSH-ключу (необязательно)
+#   -b, --branch      Ветка Git для деплоя (по умолчанию: feature/mcp-wrapper-server)
+#   --app-port        Внешний порт MCP-сервера (по умолчанию: 8086)
+#   --upstream-url    URL основного сервиса (по умолчанию: http://10.1.5.97:8084)
+#   --no-build        Не пересобирать образ (использовать существующий)
+#   --help            Показать справку
+#
+# Примеры:
+#   ./deploy-mcp-wrapper.sh
+#   ./deploy-mcp-wrapper.sh --upstream-url http://10.1.5.97:8084
+#   ./deploy-mcp-wrapper.sh -i ~/.ssh/id_rsa -b feature/my-branch
+#
+# Примечание: удалённый хост не имеет доступа в интернет.
+# Docker-образ собирается локально, затем передаётся через SSH
+# (docker save | ssh docker load) без промежуточного файла.
+# Исходники модуля передаются через git archive + scp.
+# =============================================================================
+
+set -euo pipefail
+
+# ── Цвета ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; NC='\033[0m'
+
+log()   { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
+ok()    { echo -e "${GREEN}[$(date '+%H:%M:%S')] \u2713${NC} $*"; }
+warn()  { echo -e "${YELLOW}[$(date '+%H:%M:%S')] \u26a0${NC} $*"; }
+error() { echo -e "${RED}[$(date '+%H:%M:%S')] \u2717${NC} $*" >&2; exit 1; }
+
+# ── Корень модуля и репозитория ───────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../mcp-wrapper
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                   # корень git-репозитория
+MODULE_SUBDIR="mcp-wrapper"
+
+# ── Значения по умолчанию ─────────────────────────────────────────────────────
+REMOTE_HOST="10.1.5.97"
+REMOTE_USER="svc-local-adm"
+REMOTE_PORT="22"
+SSH_KEY=""
+GIT_BRANCH="feature/mcp-wrapper-server"
+NO_BUILD=false
+APP_DIR="java-class-context-mcp"
+IMAGE_NAME="java-class-context-mcp:latest"
+APP_PORT="8086"
+UPSTREAM_URL="http://10.1.5.97:8084"
+
+# ── Разбор аргументов ─────────────────────────────────────────────────────────
+usage() {
+  grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,2\}//'
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--host)        REMOTE_HOST="$2"; shift 2 ;;
+    -u|--user)        REMOTE_USER="$2"; shift 2 ;;
+    -p|--port)        REMOTE_PORT="$2"; shift 2 ;;
+    -i|--identity)    SSH_KEY="$2"; shift 2 ;;
+    -b|--branch)      GIT_BRANCH="$2"; shift 2 ;;
+    --app-port)       APP_PORT="$2"; shift 2 ;;
+    --upstream-url)   UPSTREAM_URL="$2"; shift 2 ;;
+    --no-build)       NO_BUILD=true; shift ;;
+    --help)           usage ;;
+    *) error "Неизвестный аргумент: $1. Используйте --help для справки." ;;
+  esac
+done
+
+# ── SSH ControlMaster: одно подключение — один ввод пароля ────────────────────
+SSH_CTRL_DIR="$(mktemp -d /tmp/ssh-ctrl-XXXXXX)"
+SSH_CTRL_SOCK="${SSH_CTRL_DIR}/master"
+
+cleanup() {
+  ssh -o ControlPath="${SSH_CTRL_SOCK}" -O exit "${REMOTE_HOST}" 2>/dev/null || true
+  rm -rf "${SSH_CTRL_DIR}"
+}
+trap cleanup EXIT
+
+SSH_BASE_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=${SSH_CTRL_SOCK} -o ControlPersist=300"
+[[ -n "$SSH_KEY" ]] && SSH_BASE_OPTS="${SSH_BASE_OPTS} -i ${SSH_KEY}"
+
+SSH_CMD="ssh ${SSH_BASE_OPTS} -p ${REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
+SCP_CMD="scp -r ${SSH_BASE_OPTS} -P ${REMOTE_PORT}"
+
+# ── Первое подключение (ввод пароля) ──────────────────────────────────────────
+log "Подключение к ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} (единственный ввод пароля)..."
+$SSH_CMD "echo ok" > /dev/null 2>&1 || error "Не удалось подключиться к ${REMOTE_HOST}"
+ok "Соединение установлено (дальнейшие шаги — без пароля)"
+
+# ── Проверка зависимостей ─────────────────────────────────────────────────────
+log "Проверка зависимостей на удалённой машине..."
+$SSH_CMD bash << 'REMOTE_CHECK'
+set -e
+docker info > /dev/null 2>&1 || { echo "ERROR: docker daemon не запущен"; exit 1; }
+if docker compose version &>/dev/null 2>&1; then
+  echo "INFO: docker compose v2"
+elif command -v docker-compose &>/dev/null; then
+  echo "INFO: docker-compose v1"
+  echo "WARN: docker-compose v1 достиг EOL. Рекомендуем обновиться до docker compose v2"
+else
+  echo "ERROR: не найден ни 'docker compose', ни 'docker-compose'"
+  exit 1
+fi
+echo "ALL_OK"
+REMOTE_CHECK
+ok "Зависимости в порядке"
+
+DOCKER_COMPOSE=$($SSH_CMD 'if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi')
+log "Используем: ${DOCKER_COMPOSE}"
+
+# ── Сборка образа ЛОКАЛЬНО и передача на сервер ───────────────────────────────
+if [[ "${NO_BUILD}" == "false" ]]; then
+  log "Сборка Docker-образа ${IMAGE_NAME} локально (контекст: ${SCRIPT_DIR})..."
+  docker build -t "${IMAGE_NAME}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}" \
+    || error "Ошибка сборки образа"
+  ok "Образ ${IMAGE_NAME} собран"
+
+  log "Передача образа на ${REMOTE_HOST} (docker save | ssh docker load)..."
+  docker save "${IMAGE_NAME}" \
+    | ssh ${SSH_BASE_OPTS} -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_HOST}" \
+      'docker load'
+  ok "Образ загружен на ${REMOTE_HOST}"
+else
+  warn "Пропуск сборки (--no-build). Используется существующий образ на сервере."
+fi
+
+# ── Передача исходников модуля через git archive + scp ────────────────────────
+log "Подготовка исходников модуля '${MODULE_SUBDIR}' (ветка: ${GIT_BRANCH})..."
+LOCAL_ARCHIVE="$(mktemp /tmp/java-class-context-mcp-XXXXXX.tar.gz)"
+git -C "${REPO_DIR}" archive --format=tar.gz "${GIT_BRANCH}:${MODULE_SUBDIR}" -o "${LOCAL_ARCHIVE}" \
+  || error "Не удалось создать архив. Убедитесь, что ветка '${GIT_BRANCH}' и каталог '${MODULE_SUBDIR}' существуют."
+ok "Архив создан ($(du -sh "${LOCAL_ARCHIVE}" | cut -f1))"
+
+log "Передача архива на ${REMOTE_HOST}..."
+$SSH_CMD "rm -rf ${APP_DIR} && mkdir -p ${APP_DIR}"
+$SCP_CMD "${LOCAL_ARCHIVE}" "${REMOTE_USER}@${REMOTE_HOST}:${APP_DIR}/app.tar.gz"
+rm -f "${LOCAL_ARCHIVE}"
+ok "Архив передан"
+
+# ── Деплой на сервере ─────────────────────────────────────────────────────────
+log "Начало деплоя ветки '${GIT_BRANCH}' на ${REMOTE_HOST}:${APP_DIR} (порт ${APP_PORT})"
+
+$SSH_CMD bash -s << REMOTE_DEPLOY
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; NC='\033[0m'
+
+log()   { echo -e "\${BLUE}[remote \$(date '+%H:%M:%S')]\${NC} \$*"; }
+ok()    { echo -e "\${GREEN}[remote \$(date '+%H:%M:%S')] \u2713\${NC} \$*"; }
+warn()  { echo -e "\${YELLOW}[remote \$(date '+%H:%M:%S')] \u26a0\${NC} \$*"; }
+fail()  { echo -e "\${RED}[remote \$(date '+%H:%M:%S')] \u2717\${NC} \$*" >&2; exit 1; }
+
+APP_DIR="${APP_DIR}"
+APP_PORT="${APP_PORT}"
+DOCKER_COMPOSE="${DOCKER_COMPOSE}"
+UPSTREAM_URL="${UPSTREAM_URL}"
+
+[[ "\${APP_DIR}" != /* ]] && APP_DIR="\${HOME}/\${APP_DIR}"
+
+# 1. Распаковка архива
+log "Распаковка архива..."
+tar -xzf "\${APP_DIR}/app.tar.gz" -C "\${APP_DIR}"
+rm -f "\${APP_DIR}/app.tar.gz"
+ok "Исходники распакованы в \${APP_DIR}"
+
+cd "\${APP_DIR}"
+
+# 2. Подмена порта в docker-compose.yml: внутренний 8080 → внешний APP_PORT
+log "Настройка порта \${APP_PORT} в docker-compose.yml..."
+sed -i "s|\"8080:8080\"|\"\${APP_PORT}:8080\"|g" docker-compose.yml
+ok "Порт настроен: \${APP_PORT}->8080"
+
+# 3. Создаём .env с адресом основного сервиса (читается docker compose)
+log "Запись APP_UPSTREAM_BASE_URL=\${UPSTREAM_URL} в .env..."
+echo "APP_UPSTREAM_BASE_URL=\${UPSTREAM_URL}" > .env
+ok ".env записан"
+
+# 4. Проверка занятости порта
+PORT_IN_USE=false
+if ss -tln "( sport = :\${APP_PORT} )" 2>/dev/null | grep -q LISTEN; then
+  PORT_IN_USE=true
+fi
+
+if [[ "\${PORT_IN_USE}" == "true" ]]; then
+  if docker ps --format '{{.Ports}}' | grep -q ":\${APP_PORT}->"; then
+    warn "Порт \${APP_PORT} занят Docker-контейнером — будет освобождён через docker compose down"
+  else
+    warn "Порт \${APP_PORT} уже занят процессом вне Docker"
+    PIDS=\$(lsof -i :\${APP_PORT} -sTCP:LISTEN -t 2>/dev/null || true)
+    if [[ -n "\${PIDS}" ]]; then
+      warn "PID: \${PIDS}"
+    fi
+    read -r -p "Завершить процесс и продолжить? [y/N] " ANSWER </dev/tty
+    if [[ "\${ANSWER}" =~ ^[Yy]$ ]]; then
+      kill "\${PIDS}" 2>/dev/null && ok "Процесс \${PIDS} завершён" \
+        || { fuser -k \${APP_PORT}/tcp 2>/dev/null && ok "Порт \${APP_PORT} освобождён"; }
+      sleep 1
+    else
+      fail "Отмена деплоя. Освободите порт \${APP_PORT} вручную и запустите deploy снова"
+    fi
+  fi
+fi
+
+# 5. Перезапуск контейнера
+PROJECT_NAME=\$(basename "\${APP_DIR}")
+if docker ps --filter "name=\${PROJECT_NAME}" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+  log "Остановка предыдущего контейнера..."
+  eval "\${DOCKER_COMPOSE} down --remove-orphans"
+  ok "Контейнер остановлен"
+else
+  log "Запущенных контейнеров не найдено — первый запуск"
+fi
+
+log "Запуск контейнера..."
+eval "\${DOCKER_COMPOSE} up -d --no-build"
+ok "Контейнер запущен"
+
+# 6. Ожидание готовности (healthcheck через /info)
+log "Ожидание готовности приложения (max 90 сек)..."
+MAX_WAIT=90
+ELAPSED=0
+HEALTHY=false
+while [[ \$ELAPSED -lt \$MAX_WAIT ]]; do
+  if curl -sf "http://localhost:\${APP_PORT}/info" > /dev/null 2>&1; then
+    HEALTHY=true
+    break
+  fi
+  printf "."
+  sleep 3
+  ELAPSED=\$((ELAPSED + 3))
+done
+echo ""
+if [[ "\$HEALTHY" != "true" ]]; then
+  warn "Приложение не ответило за \${MAX_WAIT} сек. Последние логи:"
+  eval "\${DOCKER_COMPOSE} logs --tail=50"
+  exit 1
+fi
+ok "Приложение готово (\${ELAPSED} сек)"
+
+echo ""
+eval "\${DOCKER_COMPOSE} ps"
+echo ""
+ok "Деплой завершён успешно"
+SERVER_IP=\$(hostname -I | awk '{print \$1}')
+echo -e "\${GREEN} MCP SSE:     http://\${SERVER_IP}:\${APP_PORT}/sse\${NC}"
+echo -e "\${GREEN} MCP message: http://\${SERVER_IP}:\${APP_PORT}/mcp/message\${NC}"
+echo -e "\${GREEN} Info:        http://\${SERVER_IP}:\${APP_PORT}/info\${NC}"
+echo -e "\${GREEN} Swagger UI:  http://\${SERVER_IP}:\${APP_PORT}/docs\${NC}"
+
+REMOTE_DEPLOY
+
+ok "Деплой на ${REMOTE_HOST} завершён"

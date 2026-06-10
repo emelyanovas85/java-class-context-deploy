@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: java-class-context-mcp
+  jackson:
+    serialization:
+      indent-output: true
+  ai:
+    mcp:
+      server:
+        # Идентификация сервера в MCP-протоколе
+        name: java-class-context-mcp
+        version: 1.0.0
+        # Синхронный режим (tools блокирующие — проксируют HTTP к основному сервису)
+        type: SYNC
+        # SSE-транспорт (по умолчанию для webmvc-стартера)
+        protocol: SSE
+        # Эндпоинты SSE-транспорта (значения по умолчанию приведены явно)
+        sse-endpoint: /sse
+        sse-message-endpoint: /mcp/message
+        # Инструкции для MCP-клиента
+        instructions: >
+          Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
+          Сначала вызовите create_review_session (вернёт sessionId), затем используйте sessionId
+          в инструментах структуры/исходников. get_source_lines_jar работает без сессии.
+
+# Подключение к основному сервису Java Class Context API
+app:
+  upstream:
+    # Переопределяется переменной окружения APP_UPSTREAM_BASE_URL
+    base-url: ${APP_UPSTREAM_BASE_URL:http://10.1.5.97:8084}
+    connect-timeout: ${APP_UPSTREAM_CONNECT_TIMEOUT:5000}
+    read-timeout: ${APP_UPSTREAM_READ_TIMEOUT:120000}
+
+logging:
+  level:
+    service.mcp: ${LOGGING_LEVEL_SERVICE_MCP:INFO}
+    io.modelcontextprotocol: ${LOGGING_LEVEL_MCP:INFO}
