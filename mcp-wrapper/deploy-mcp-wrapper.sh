@@ -15,7 +15,7 @@
 #   -u, --user        SSH-пользователь (по умолчанию: svc-local-adm)
 #   -p, --port        SSH-порт (по умолчанию: 22)
 #   -i, --identity    Путь к приватному SSH-ключу (необязательно)
-#   -b, --branch      Ветка Git для деплоя (по умолчанию: feature/mcp-wrapper-server)
+#   -b, --branch      Ветка Git для деплоя (по умолчанию: main)
 #   --app-port        Внешний порт MCP-сервера (по умолчанию: 8086)
 #   --upstream-url    URL основного сервиса (по умолчанию: http://10.1.5.97:8084)
 #   --no-build        Не пересобирать образ (использовать существующий)
@@ -53,7 +53,7 @@ REMOTE_HOST="10.1.5.97"
 REMOTE_USER="svc-local-adm"
 REMOTE_PORT="22"
 SSH_KEY=""
-GIT_BRANCH="feature/mcp-wrapper-server"
+GIT_BRANCH="main"
 NO_BUILD=false
 APP_DIR="java-class-context-mcp"
 IMAGE_NAME="java-class-context-mcp:latest"
