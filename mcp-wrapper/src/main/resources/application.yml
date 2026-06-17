@@ -15,11 +15,11 @@ spring:
         version: 1.0.0
         # Синхронный режим (tools блокирующие — проксируют HTTP к основному сервису)
         type: SYNC
-        # SSE-транспорт (по умолчанию для webmvc-стартера)
-        protocol: SSE
-        # Эндпоинты SSE-транспорта (значения по умолчанию приведены явно)
-        sse-endpoint: /sse
-        sse-message-endpoint: /mcp/message
+        # Streamable HTTP транспорт — обязателен для Open WebUI v0.9.6+
+        # Open WebUI использует MCPClient → streamablehttp_client (протокол 2024-11-05).
+        # Классический SSE-транспорт (/sse + POST /mcp/message) не поддерживается.
+        # Endpoint: POST /mcp
+        protocol: STREAMABLE_HTTP
         # Инструкции для MCP-клиента
         instructions: >
           Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
