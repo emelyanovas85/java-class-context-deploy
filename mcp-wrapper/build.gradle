@@ -1,6 +1,6 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.5.2'
+    id 'org.springframework.boot' version '4.0.6'
     id 'io.spring.dependency-management' version '1.1.7'
 }
 
@@ -18,8 +18,8 @@ repositories {
 }
 
 ext {
-    // Spring AI 2.0.0 — требует Spring Boot 3.5.x.
-    // Поддерживает Streamable HTTP через WebMVC: endpoint POST /mcp.
+    // Spring AI 2.0.0 GA (2026-06-12) — требует Spring Boot 4.0+ + Jackson 3.x.
+    // Streamable HTTP (/mcp) работает через WebMVC в режиме SYNC.
     springAiVersion = '2.0.0'
 }
 
@@ -34,16 +34,15 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
 
-    // Spring AI — MCP Server поверх Spring MVC
-    // в 2.0.0 поддерживает и SSE (/sse), и Streamable HTTP (/mcp)
+    // Spring AI MCP Server (WebMVC) — Streamable HTTP + SSE
     implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
 
     // Lombok
     compileOnly 'org.projectlombok:lombok:1.18.38'
     annotationProcessor 'org.projectlombok:lombok:1.18.38'
 
-    // Jackson (уже в spring-boot-starter-web)
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    // Jackson 3.x (подтягивается через Spring Boot 4.x BOM)
+    implementation 'tools.jackson.core:jackson-databind'
 
     // Swagger UI / OpenAPI 3
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.8'
