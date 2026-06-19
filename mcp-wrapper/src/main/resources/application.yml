@@ -10,26 +10,20 @@ spring:
   ai:
     mcp:
       server:
-        # Идентификация сервера в MCP-протоколе
         name: java-class-context-mcp
         version: 1.0.0
-        # Синхронный режим (tools блокирующие — проксируют HTTP к основному сервису)
         type: SYNC
-        # Streamable HTTP транспорт — обязателен для Open WebUI v0.9.6+
-        # Open WebUI использует MCPClient → streamablehttp_client (протокол 2024-11-05).
-        # Значение STREAMABLE поддерживается Spring AI 2.0.0 + spring-ai-starter-mcp-server-webmvc.
+        # Spring AI 1.0.0 поддерживает STREAMABLE_HTTP.
+        # Open WebUI использует streamablehttp_client (MCP протокол 2024-11-05).
         # Endpoint: POST /mcp
-        protocol: STREAMABLE
-        # Инструкции для MCP-клиента
+        protocol: STREAMABLE_HTTP
         instructions: >
           Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
           Сначала вызовите create_review_session (вернёт sessionId), затем используйте sessionId
           в инструментах структуры/исходников. get_source_lines_jar работает без сессии.
 
-# Подключение к основному сервису Java Class Context API
 app:
   upstream:
-    # Переопределяется переменной окружения APP_UPSTREAM_BASE_URL
     base-url: ${APP_UPSTREAM_BASE_URL:http://10.1.5.97:8084}
     connect-timeout: ${APP_UPSTREAM_CONNECT_TIMEOUT:5000}
     read-timeout: ${APP_UPSTREAM_READ_TIMEOUT:120000}
