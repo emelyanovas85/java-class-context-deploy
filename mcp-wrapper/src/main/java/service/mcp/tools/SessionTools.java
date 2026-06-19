@@ -1,6 +1,5 @@
 package service.mcp.tools;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
@@ -9,6 +8,7 @@ import org.springframework.stereotype.Component;
 import service.mcp.client.JavaClassContextClient;
 import service.mcp.model.SessionDtos.CreateSessionRequest;
 import service.mcp.model.SessionDtos.CreateSessionResponse;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * MCP-инструменты группы Sessions — жизненный цикл сессии ревью MR.
@@ -26,7 +26,7 @@ public class SessionTools {
             возвращает sessionId, который нужно передавать во все последующие инструменты
             (структура, исходники, диаграммы). Загружает MR, фиксирует sourceSha/targetSha
             и строит merged file index в фоне (последующие work-запросы дождутся его готовности).
-            Токен GitLab передаётся ТОЛЬКО здесь; дальше он не нужен.
+            Токен GitLab передаётся ТОЛЬКО ЗДЕСЬ; дальше он не нужен.
             Повторный вызов для того же MR терминирует предыдущую сессию.
             Возвращает JSON: sessionId, sourceSha, targetSha, baseSha, expiresAt.
             """)
