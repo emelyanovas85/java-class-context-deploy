@@ -1,6 +1,6 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.4.5'
+    id 'org.springframework.boot' version '3.5.2'
     id 'io.spring.dependency-management' version '1.1.7'
 }
 
@@ -18,8 +18,9 @@ repositories {
 }
 
 ext {
-    // Spring AI 1.0.0 GA — совместим со Spring Boot 3.4.x
-    springAiVersion = '1.0.0'
+    // Spring AI 2.0.0 GA — совместим со Spring Boot 3.5.x
+    // Поддерживает Streamable HTTP транспорт в webmvc-стартере
+    springAiVersion = '2.0.0'
 }
 
 dependencyManagement {
@@ -33,7 +34,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
 
-    // Spring AI — MCP Server поверх Spring MVC (SSE / Streamable-HTTP транспорт)
+    // Spring AI — MCP Server поверх Spring MVC (Streamable HTTP транспорт)
     implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
 
     // Lombok

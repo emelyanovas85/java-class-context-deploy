@@ -17,9 +17,9 @@ spring:
         type: SYNC
         # Streamable HTTP транспорт — обязателен для Open WebUI v0.9.6+
         # Open WebUI использует MCPClient → streamablehttp_client (протокол 2024-11-05).
-        # Классический SSE-транспорт (/sse + POST /mcp/message) не поддерживается.
+        # Значение STREAMABLE поддерживается Spring AI 2.0.0 + spring-ai-starter-mcp-server-webmvc.
         # Endpoint: POST /mcp
-        protocol: STREAMABLE_HTTP
+        protocol: STREAMABLE
         # Инструкции для MCP-клиента
         instructions: >
           Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
