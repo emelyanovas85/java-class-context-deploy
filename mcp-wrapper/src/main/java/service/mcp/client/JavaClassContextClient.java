@@ -1,6 +1,5 @@
 package service.mcp.client;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -19,8 +18,8 @@ import service.mcp.model.SessionDtos.SessionRequest;
  * Тонкий HTTP-клиент к основному сервису Java Class Context API.
  *
  * <p>Каждый метод проксирует соответствующий REST-эндпоинт основного сервиса.
- * JSON-ответы возвращаются как «сырой» текст ({@code String}), чтобы MCP-инструмент мог
- * передать их LLM без потери структуры. Типизированный ответ используется только для create-сессии,
+ * JSON-ответы возвращаются как «сырой» текст ({@code String}), чтобы MCP-инструмент мог передать
+ * их LLM без потери структуры. Типизированный ответ используется только для create-сессии,
  * где удобно работать с полями (например, {@code sessionId}).
  *
  * <p>Любой не-2xx ответ основного сервиса транслируется в {@link UpstreamException}
@@ -32,7 +31,7 @@ import service.mcp.model.SessionDtos.SessionRequest;
 public class JavaClassContextClient {
 
     private final RestClient upstreamRestClient;
-    private final ObjectMapper objectMapper;
+    // ObjectMapper удалён: в классе нигде не использовался, Spring Boot 4.x перешёл на tools.jackson
 
     // ---------------------------------------------------------------------
     // Sessions
