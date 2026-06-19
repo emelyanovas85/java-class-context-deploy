@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import service.mcp.client.JavaClassContextClient;
 import service.mcp.model.SessionDtos.CreateSessionRequest;
 import service.mcp.model.SessionDtos.CreateSessionResponse;
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -61,7 +62,8 @@ public class SessionTools {
     private String toJson(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
-        } catch (Exception e) {
+        } catch (JacksonException e) {
+            log.warn("Failed to serialize response to JSON", e);
             return String.valueOf(value);
         }
     }
