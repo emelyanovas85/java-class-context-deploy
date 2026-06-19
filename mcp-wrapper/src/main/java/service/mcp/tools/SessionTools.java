@@ -1,7 +1,7 @@
 package service.mcp.tools;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
@@ -16,11 +16,16 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class SessionTools {
 
     private final JavaClassContextClient client;
     private final ObjectMapper objectMapper;
+
+    public SessionTools(JavaClassContextClient client,
+                        @Qualifier("jacksonJsonMapper") ObjectMapper objectMapper) {
+        this.client = client;
+        this.objectMapper = objectMapper;
+    }
 
     @Tool(name = "create_review_session", description = """
             Создать сессию ревью GitLab Merge Request. Это ПЕРВЫЙ шаг любого анализа:
