@@ -13,9 +13,10 @@ spring:
         name: java-class-context-mcp
         version: 1.0.0
         type: SYNC
-        # Spring AI 1.0.0 поддерживает STREAMABLE_HTTP.
+        # Spring AI 2.0.0 + WebMVC поддерживает STREAMABLE_HTTP.
         # Open WebUI использует streamablehttp_client (MCP протокол 2024-11-05).
         # Endpoint: POST /mcp
+        sse-message-endpoint: /mcp/messages
         protocol: STREAMABLE_HTTP
         instructions: >
           Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
