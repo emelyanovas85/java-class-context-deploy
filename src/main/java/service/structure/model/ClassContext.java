@@ -1,7 +1,7 @@
 package service.structure.model;
 
-import tools.jackson.annotation.JsonSubTypes;
-import tools.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 
 import java.util.List;
 import java.util.Objects;
@@ -65,19 +65,6 @@ public sealed interface ClassContext
 
     /**
      * Фабрика: сравнивает структуры и возвращает подходящий подтип.
-     *
-     * <ul>
-     *   <li>Если оба не null и равны — {@link UnchangedClassContext}.</li>
-     *   <li>Иначе — {@link ModifiedClassContext}.</li>
-     * </ul>
-     *
-     * @param id               сквозной id
-     * @param callerIds        id классов-потребителей
-     * @param name             qualified name
-     * @param level            уровень контекста
-     * @param source           источник: "main", "test" или "groupId:artifactId:version"
-     * @param structureSource  структура source-ветки (null — файл удалён)
-     * @param structureTarget  структура target-ветки (null — файл создан)
      */
     static ClassContext of(int id, Set<Integer> callerIds,
                            String name, int level,

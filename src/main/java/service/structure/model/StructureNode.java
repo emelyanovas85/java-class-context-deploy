@@ -1,6 +1,6 @@
 package service.structure.model;
 
-import tools.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.List;
 

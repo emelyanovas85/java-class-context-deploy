@@ -1,6 +1,6 @@
 package service.structure.model;
 
-import tools.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.util.List;
@@ -19,14 +19,6 @@ public record SourceLinesResponse(
         List<FileResult> files
 ) {
 
-    /**
-     * Результат для одного класса.
-     *
-     * @param filePath qualified name или путь к файлу
-     * @param error    сообщение об ошибке ({@code null} при успехе)
-     * @param snippets строки всех запрошенных диапазонов, дедуплицированные по номеру строки.
-     *                 {@code null} при ошибке.
-     */
     @Schema(description = "Результат для одного класса")
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record FileResult(
