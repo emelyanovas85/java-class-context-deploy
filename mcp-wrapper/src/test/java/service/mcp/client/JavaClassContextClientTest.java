@@ -1,6 +1,5 @@
 package service.mcp.client;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -25,13 +24,12 @@ class JavaClassContextClientTest {
     private RestClient.Builder builder;
     private MockRestServiceServer server;
     private JavaClassContextClient client;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     @BeforeEach
     void setUp() {
         builder = RestClient.builder().baseUrl("http://upstream:8084");
         server = MockRestServiceServer.bindTo(builder).build();
-        client = new JavaClassContextClient(builder.build(), mapper);
+        client = new JavaClassContextClient(builder.build());
     }
 
     @Test
