@@ -1,7 +1,8 @@
 package service.structure.dependency;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -63,7 +64,7 @@ public class ArtifactorySourcesLoader {
         }
     }
 
-    // ── Public API ───────────────────────────────────────────────────────────
+    // ── Public API ───────────────────────────────────────────────────
 
     public List<String> detectArtifactoryUrls(List<String> gradleFileContents) {
         List<String> urls = new ArrayList<>();
@@ -151,7 +152,7 @@ public class ArtifactorySourcesLoader {
                 }
                 break;
             }
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to parse .module file {}: {}", moduleFilePath, e.getMessage());
         }
         log.debug("Parsed {} api deps from .module of {}", result.size(), parentDep);
@@ -167,7 +168,7 @@ public class ArtifactorySourcesLoader {
         return parseApiDependencies(moduleFilePath, parentDep, List.of());
     }
 
-    // ── Динамические версии ─────────────────────────────────────────────
+    // ── Динамические версии ────────────────────────────────────────
 
     private String resolveVersionIfDynamic(String version, String group, String module,
                                            List<String> repoUrls) {
@@ -259,7 +260,7 @@ public class ArtifactorySourcesLoader {
 
         String trimmed = versionExpr.trim();
 
-        // ── "+"-версии ──────────────────────────────────────────────
+        // ── "+"-версии ───────────────────────────────────────
         if (trimmed.contains("+")) {
             String prefix = trimmed.substring(0, trimmed.indexOf('+')).trim();
             if (prefix.isEmpty() || prefix.equals("latest")) {
@@ -275,7 +276,7 @@ public class ArtifactorySourcesLoader {
                             (a, b) -> compareVersionParts(a, b)));
         }
 
-        // ── Maven range ──────────────────────────────────────────────
+        // ── Maven range ──────────────────────────────────────
         if (trimmed.startsWith("[") || trimmed.startsWith("(")) {
             VersionRange range = VersionRange.parse(trimmed);
             return versions.stream()
@@ -288,7 +289,7 @@ public class ArtifactorySourcesLoader {
         return Optional.empty();
     }
 
-    // ── VersionRange record ─────────────────────────────────────────────
+    // ── VersionRange record ───────────────────────────────────────
 
     record VersionRange(String lower, boolean lowerInclusive,
                         String upper, boolean upperInclusive) {
@@ -320,7 +321,7 @@ public class ArtifactorySourcesLoader {
         }
     }
 
-    // ── Version helpers ────────────────────────────────────────────────
+    // ── Version helpers ──────────────────────────────────────────
 
     static List<Integer> parseVersion(String version) {
         if (version == null) return List.of();
@@ -342,7 +343,7 @@ public class ArtifactorySourcesLoader {
         return 0;
     }
 
-    // ── XML helpers ───────────────────────────────────────────────────
+    // ── XML helpers ─────────────────────────────────────────────
 
     private static String extractXmlElement(String xml, String tag) {
         int open  = xml.indexOf('<' + tag + '>');
@@ -366,7 +367,7 @@ public class ArtifactorySourcesLoader {
         return result;
     }
 
-    // ── JSON / URL helpers ─────────────────────────────────────────────
+    // ── JSON / URL helpers ────────────────────────────────────────
 
     private static String extractVersionString(JsonNode versionNode) {
         if (versionNode == null || versionNode.isMissingNode()) return null;
