@@ -1,7 +1,7 @@
 package service.structure.model;
 
-import com.fasterxml.jackson.annotation.JsonSubTypes;
-import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import tools.jackson.annotation.JsonSubTypes;
+import tools.jackson.annotation.JsonTypeInfo;
 
 import java.util.List;
 import java.util.Objects;

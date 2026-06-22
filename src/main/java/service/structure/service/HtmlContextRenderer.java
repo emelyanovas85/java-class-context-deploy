@@ -1,7 +1,7 @@
 package service.structure.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import service.structure.model.ContextResponse;
@@ -39,7 +39,7 @@ public class HtmlContextRenderer {
         String json;
         try {
             json = objectMapper.writeValueAsString(response);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalStateException("Failed to serialize context for debug page", e);
         }
         return pageShell.replace(DATA_PLACEHOLDER, escapeForScriptTag(json));
