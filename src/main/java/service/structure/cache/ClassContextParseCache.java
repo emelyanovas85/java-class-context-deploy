@@ -1,5 +1,6 @@
 package service.structure.cache;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import lombok.extern.slf4j.Slf4j;
@@ -302,7 +303,7 @@ public class ClassContextParseCache {
             ParseCacheDiskFile disk = objectMapper.readValue(file.toFile(), ParseCacheDiskFile.class);
             log.debug("Parse cache loaded {} entries from {}", disk.entries().size(), file.getFileName());
             return disk;
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to read parse cache {}: {}", file, e.getMessage());
             return ParseCacheDiskFile.empty();
         }
@@ -322,7 +323,7 @@ public class ClassContextParseCache {
             objectMapper.writerWithDefaultPrettyPrinter()
                     .writeValue(file.toFile(), disk);
             log.debug("Parse cache flushed {} entries to {}", disk.entries().size(), file.getFileName());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to write parse cache {}: {}", file, e.getMessage());
         }
     }
