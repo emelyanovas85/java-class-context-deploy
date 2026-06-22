@@ -13,10 +13,8 @@ spring:
         name: java-class-context-mcp
         version: 1.0.0
         type: SYNC
-        # Spring AI 2.0.0: правильные значения: STREAMABLE | SSE | STATELESS
-        # STREAMABLE — endpoint POST /mcp (Streamable HTTP)
-        # SSE — endpoints GET /sse + POST /mcp/message
-        protocol: SSE
+        # Spring AI 2.0.0: STREAMABLE → endpoint POST /mcp (Streamable HTTP)
+        protocol: STREAMABLE
         instructions: >
           Обёртка над Java Class Context API: структурный анализ Java-классов по GitLab Merge Request.
           Сначала вызовите create_review_session (вернёт sessionId), затем используйте sessionId
@@ -28,17 +26,7 @@ app:
     connect-timeout: ${APP_UPSTREAM_CONNECT_TIMEOUT:5000}
     read-timeout: ${APP_UPSTREAM_READ_TIMEOUT:120000}
 
-management:
-  endpoints:
-    web:
-      exposure:
-        include: mappings,beans,health
-  endpoint:
-    health:
-      show-details: always
-
 logging:
   level:
     service.mcp: ${LOGGING_LEVEL_SERVICE_MCP:INFO}
     io.modelcontextprotocol: ${LOGGING_LEVEL_MCP:INFO}
-    org.springframework.ai.mcp: DEBUG
