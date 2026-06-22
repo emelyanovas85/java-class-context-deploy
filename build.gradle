@@ -37,6 +37,7 @@ dependencies {
 
     // Jackson 3.x (Spring Boot 4.x включает Jackson 3.x через tools.jackson)
     implementation 'tools.jackson.core:jackson-databind'
+    implementation 'tools.jackson.core:jackson-annotations'
 
     // Swagger UI / OpenAPI 3 — версия 3.x требуется для Spring Boot 4.x
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.0'
