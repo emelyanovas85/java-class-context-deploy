@@ -28,7 +28,18 @@ app:
     connect-timeout: ${APP_UPSTREAM_CONNECT_TIMEOUT:5000}
     read-timeout: ${APP_UPSTREAM_READ_TIMEOUT:120000}
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: mappings,beans,health
+  endpoint:
+    health:
+      show-details: always
+
 logging:
   level:
     service.mcp: ${LOGGING_LEVEL_SERVICE_MCP:INFO}
     io.modelcontextprotocol: ${LOGGING_LEVEL_MCP:INFO}
+    org.springframework.ai.mcp: DEBUG
+    org.springframework.web.servlet.mvc.method.annotation: DEBUG
