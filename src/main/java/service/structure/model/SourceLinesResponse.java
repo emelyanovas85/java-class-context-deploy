@@ -1,6 +1,6 @@
 package service.structure.model;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
+import tools.jackson.annotation.JsonInclude;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.util.List;
@@ -10,7 +10,7 @@ import java.util.List;
  *
  * <p>Строки всех диапазонов одного класса объединяются в один список без дублей,
  * в порядке появления диапазонов в запросе. Дедупликация — по номеру строки.
- * Каждая строка имеет префикс номера: {@code "19: public void foo() {")}.
+ * Каждая строка имеет префикс номера: {@code "19: public void foo() {"}.
  */
 @Schema(description = "Строки исходного кода")
 public record SourceLinesResponse(

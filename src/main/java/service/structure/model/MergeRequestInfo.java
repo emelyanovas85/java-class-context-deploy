@@ -1,6 +1,6 @@
 package service.structure.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
+import tools.jackson.annotation.JsonIgnore;
 import org.gitlab4j.api.models.Diff;
 
 import java.util.List;
