@@ -1,6 +1,6 @@
 package service.structure.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import service.structure.model.ContextResponse;
 import service.structure.model.FileContext;
