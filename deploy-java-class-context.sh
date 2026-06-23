@@ -36,7 +36,6 @@ ok()    { echo -e "${GREEN}[$(date '+%H:%M:%S')] \u2713${NC} $*"; }
 warn()  { echo -e "${YELLOW}[$(date '+%H:%M:%S')] \u26a0${NC} $*"; }
 error() { echo -e "${RED}[$(date '+%H:%M:%S')] \u2717${NC} $*" >&2; exit 1; }
 
-# ── Корень локального репозитория ───────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Значения по умолчанию ─────────────────────────────────────────────────────
@@ -113,7 +112,7 @@ ok "Зависимости в порядке"
 DOCKER_COMPOSE=$($SSH_CMD 'if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi')
 log "Используем: ${DOCKER_COMPOSE}"
 
-# ── Сборка образа ЛОКАЛЬНО и передача на сервер ──────────────────────────────
+# ── Сборка ЛОКАЛЬНО и передача на сервер ───────────────────────────────────
 if [[ "${NO_BUILD}" == "false" ]]; then
   log "Сборка Docker-образа ${IMAGE_NAME} локально..."
   docker build -t "${IMAGE_NAME}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}" \
@@ -129,11 +128,11 @@ else
   warn "Пропуск сборки (--no-build). Используется существующий образ на сервере."
 fi
 
-# ── Передача исходников через scp ───────────────────────────────────────────────
+# ── Передача исходников ───────────────────────────────────────────────────────
 log "Подготовка исходников (ветка: ${GIT_BRANCH})..."
 LOCAL_ARCHIVE="$(mktemp /tmp/java-class-context-XXXXXX.tar.gz)"
 git -C "${SCRIPT_DIR}" archive --format=tar.gz "${GIT_BRANCH}" -o "${LOCAL_ARCHIVE}" \
-  || error "Не удалось создать архив. Убедитесь, что ветка '${GIT_BRANCH}' существует локально."
+  || error "Не удалось создать архив."
 ok "Архив создан ($(du -sh "${LOCAL_ARCHIVE}" | cut -f1))"
 
 log "Передача архива на ${REMOTE_HOST}..."
@@ -158,6 +157,7 @@ fail()  { echo -e "\${RED}[remote \$(date '+%H:%M:%S')] \u2717\${NC} \$*" >&2; e
 
 APP_DIR="${APP_DIR}"
 APP_PORT="${APP_PORT}"
+IMAGE_NAME="${IMAGE_NAME}"
 DOCKER_COMPOSE="${DOCKER_COMPOSE}"
 
 [[ "\${APP_DIR}" != /* ]] && APP_DIR="\${HOME}/\${APP_DIR}"
@@ -175,17 +175,18 @@ log "Настройка порта \${APP_PORT} в docker-compose.yml..."
 sed -i "s|\"8080:8080\"|\"${APP_PORT}:8080\"|g" docker-compose.yml
 ok "Порт настроен: \${APP_PORT}->8080"
 
-# 3. Остановить ЛЮБОЙ контейнер, занимающий порт APP_PORT
-#    (независимо от того, через какой compose-проект он был запущен)
-OLD_CONTAINERS=\$(docker ps -q --filter "publish=\${APP_PORT}" 2>/dev/null || true)
-if [[ -n "\${OLD_CONTAINERS}" ]]; then
-  warn "Сонтейнеры на порту \${APP_PORT}: \${OLD_CONTAINERS}"
-  log "Остановка и удаление контейнеров..."
-  docker stop \${OLD_CONTAINERS}
-  docker rm \${OLD_CONTAINERS}
-  ok "Порт \${APP_PORT} освобождён"
+# 3. Остановка контейнеров, запущенных из нашего образа (\${IMAGE_NAME})
+#    Не трогаем чужие контейнеры: фильтруем строго по имени образа
+OWN_CONTAINERS=\$(docker ps -q --filter "ancestor=\${IMAGE_NAME}" 2>/dev/null || true)
+if [[ -n "\${OWN_CONTAINERS}" ]]; then
+  warn "Найдены работающие контейнеры образа \${IMAGE_NAME}:"
+  docker ps --filter "ancestor=\${IMAGE_NAME}" --format "  {{.ID}}  {{.Names}}  {{.Ports}}"
+  log "Остановка и удаление..."
+  docker stop \${OWN_CONTAINERS}
+  docker rm \${OWN_CONTAINERS}
+  ok "Контейнеры остановлены"
 else
-  log "Порт \${APP_PORT} свободен"
+  log "Запущенных контейнеров образа \${IMAGE_NAME} не найдено"
 fi
 
 # 4. Запуск
@@ -195,17 +196,12 @@ ok "Контейнер запущен"
 
 # 5. Ожидание готовности
 log "Ожидание готовности приложения (max 90 сек)..."
-MAX_WAIT=90
-ELAPSED=0
-HEALTHY=false
+MAX_WAIT=90; ELAPSED=0; HEALTHY=false
 while [[ \$ELAPSED -lt \$MAX_WAIT ]]; do
   if curl -sf "http://localhost:\${APP_PORT}/docs" > /dev/null 2>&1; then
-    HEALTHY=true
-    break
+    HEALTHY=true; break
   fi
-  printf "."
-  sleep 3
-  ELAPSED=\$((ELAPSED + 3))
+  printf "."; sleep 3; ELAPSED=\$((ELAPSED + 3))
 done
 echo ""
 if [[ "\$HEALTHY" != "true" ]]; then
