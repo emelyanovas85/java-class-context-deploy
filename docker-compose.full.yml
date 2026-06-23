@@ -1,0 +1,39 @@
+# Full-stack deployment: java-class-context-service + mcp-wrapper
+# Используется когда оба сервиса поднимаются на одном хосте.
+#
+# Порты:
+#   8084 — java-class-context REST API (основной сервис)
+#   8083 — mcp-wrapper MCP/SSE HTTP (для подключения из Open WebUI)
+#
+# Запуск:
+#   docker compose -f docker-compose.full.yml up -d
+
+services:
+  java-context-service:
+    image: java-class-context:latest
+    ports:
+      - "8084:8080"
+    volumes:
+      - artifacts-data:/app/artifacts
+    environment:
+      APP_PARSE_CACHE_ENABLED: "true"
+      APP_PARSE_CACHE_DIR: /app/artifacts
+      APP_ARTIFACTS_DIR: /app/artifacts
+      LOGGING_LEVEL_SERVICE_STRUCTURE: INFO
+    restart: unless-stopped
+
+  java-context-mcp:
+    image: java-class-context-mcp:latest
+    ports:
+      - "8083:8080"
+    environment:
+      APP_UPSTREAM_BASE_URL: http://java-context-service:8080
+      APP_UPSTREAM_CONNECT_TIMEOUT: "5000"
+      APP_UPSTREAM_READ_TIMEOUT: "120000"
+      LOGGING_LEVEL_SERVICE_MCP: INFO
+    depends_on:
+      - java-context-service
+    restart: unless-stopped
+
+volumes:
+  artifacts-data:
