@@ -1,5 +1,0 @@
---- a/open_webui/utils/tools.py
-+++ b/open_webui/utils/tools.py
-@@ -1 +1 @@
--        if session_id:
-+        if True:  # patched: always call tools/list (stateless MCP, no Mcp-Session-Id)
