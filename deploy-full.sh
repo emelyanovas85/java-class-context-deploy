@@ -60,6 +60,10 @@ IMAGE_MCP="java-class-context-mcp:latest"
 PORT_MAIN="8084"
 PORT_MCP="8086"
 
+# Папка старого одиночного деплоя (deploy-java-class-context.sh)
+# Если она существует на сервере — стек будет остановлен перед запуском full-стека
+LEGACY_APP_DIR="java-class-context"
+
 # ── Разбор аргументов ─────────────────────────────────────────────────────────
 usage() {
   grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,2\}//'
@@ -172,15 +176,37 @@ warn()  { echo -e "\${YELLOW}[remote \$(date '+%H:%M:%S')] \u26a0\${NC} \$*"; }
 fail()  { echo -e "\${RED}[remote \$(date '+%H:%M:%S')] \u2717\${NC} \$*" >&2; exit 1; }
 
 APP_DIR="${APP_DIR}"
+LEGACY_APP_DIR="${LEGACY_APP_DIR}"
 DOCKER_COMPOSE="${DOCKER_COMPOSE}"
 PORT_MAIN="${PORT_MAIN}"
 PORT_MCP="${PORT_MCP}"
 
 [[ "\${APP_DIR}" != /* ]] && APP_DIR="\${HOME}/\${APP_DIR}"
+[[ "\${LEGACY_APP_DIR}" != /* ]] && LEGACY_APP_DIR="\${HOME}/\${LEGACY_APP_DIR}"
+
+# 0. Остановка legacy-стека (deploy-java-class-context.sh), если запущен
+#    Он использует ~/java-class-context/docker-compose.yml и занимает порт 8084
+if [[ -f "\${LEGACY_APP_DIR}/docker-compose.yml" ]]; then
+  if eval "\${DOCKER_COMPOSE} -f \${LEGACY_APP_DIR}/docker-compose.yml ps -q 2>/dev/null" | grep -q .; then
+    log "Остановка legacy-стека (java-class-context)..."
+    eval "\${DOCKER_COMPOSE} -f \${LEGACY_APP_DIR}/docker-compose.yml down --remove-orphans"
+    ok "Legacy-стек остановлен"
+  else
+    log "Legacy-стек не запущен — проверяем контейнеры напрямую"
+  fi
+fi
+
+# Дополнительная защита: убить любой контейнер, занимающий порт 8084
+if docker ps --format '{{.Ports}}' | grep -q ":\${PORT_MAIN}->"; then
+  warn "Порт \${PORT_MAIN} всё ещё занят — принудительная остановка контейнера..."
+  docker ps -q --filter "publish=\${PORT_MAIN}" | xargs -r docker stop
+  docker ps -aq --filter "publish=\${PORT_MAIN}" | xargs -r docker rm
+  ok "Порт \${PORT_MAIN} освобождён"
+fi
 
 cd "\${APP_DIR}"
 
-# 1. Остановка предыдущего стека (если был)
+# 1. Остановка предыдущего full-стека (если был)
 if eval "\${DOCKER_COMPOSE} -f docker-compose.full.yml ps -q 2>/dev/null" | grep -q .; then
   log "Остановка предыдущего стека..."
   eval "\${DOCKER_COMPOSE} -f docker-compose.full.yml down --remove-orphans"
