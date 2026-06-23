@@ -2,7 +2,7 @@ services:
   java-context-mcp:
     image: java-class-context-mcp:latest
     ports:
-      - "8080:8080"
+      - "8086:8080"
     environment:
       # Адрес основного сервиса Java Class Context API.
       # На целевом сервере основной сервис развёрнут на 10.1.5.97:8084.
