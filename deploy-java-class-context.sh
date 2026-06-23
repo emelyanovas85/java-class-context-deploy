@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy.sh — разворачивание java-class-context на удалённой машине
+# deploy-java-class-context.sh — разворачивание java-class-context на удалённой машине
 #
 # Использование:
-#   ./deploy.sh [ОПЦИИ]
+#   ./deploy-java-class-context.sh [ОПЦИИ]
 #
 # Опции:
 #   -h, --host       SSH-хост удалённой машины (по умолчанию: 10.1.5.97)
@@ -15,13 +15,13 @@
 #   --help           Показать справку
 #
 # Примеры:
-#   ./deploy.sh
-#   ./deploy.sh -h 192.168.1.100 -u deploy
-#   ./deploy.sh -i ~/.ssh/id_rsa -b feature/my-branch
+#   ./deploy-java-class-context.sh
+#   ./deploy-java-class-context.sh -h 192.168.1.100 -u deploy
+#   ./deploy-java-class-context.sh -i ~/.ssh/id_rsa -b feature/my-branch
 #
 # Примечание: удалённый хост не имеет доступа в интернет.
 # Docker-образ собирается локально, затем передаётся через SSH
-# (docker save | ssh docker load) без промежуточного файла.
+# (docker save | ssh docker load) без промежуточных файлов.
 # Исходники также передаются через scp с локальной машины.
 # =============================================================================
 
@@ -36,7 +36,7 @@ ok()    { echo -e "${GREEN}[$(date '+%H:%M:%S')] \u2713${NC} $*"; }
 warn()  { echo -e "${YELLOW}[$(date '+%H:%M:%S')] \u26a0${NC} $*"; }
 error() { echo -e "${RED}[$(date '+%H:%M:%S')] \u2717${NC} $*" >&2; exit 1; }
 
-# ── Корень локального репозитория ─────────────────────────────────────────────
+# ── Корень локального репозитория ───────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Значения по умолчанию ─────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ ok "Зависимости в порядке"
 DOCKER_COMPOSE=$($SSH_CMD 'if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi')
 log "Используем: ${DOCKER_COMPOSE}"
 
-# ── Сборка образа ЛОКАЛЬНО и передача на сервер ───────────────────────────────
+# ── Сборка образа ЛОКАЛЬНО и передача на сервер ──────────────────────────────
 if [[ "${NO_BUILD}" == "false" ]]; then
   log "Сборка Docker-образа ${IMAGE_NAME} локально..."
   docker build -t "${IMAGE_NAME}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}" \
@@ -129,7 +129,7 @@ else
   warn "Пропуск сборки (--no-build). Используется существующий образ на сервере."
 fi
 
-# ── Передача исходников через scp ─────────────────────────────────────────────
+# ── Передача исходников через scp ───────────────────────────────────────────────
 log "Подготовка исходников (ветка: ${GIT_BRANCH})..."
 LOCAL_ARCHIVE="$(mktemp /tmp/java-class-context-XXXXXX.tar.gz)"
 git -C "${SCRIPT_DIR}" archive --format=tar.gz "${GIT_BRANCH}" -o "${LOCAL_ARCHIVE}" \
@@ -170,52 +170,30 @@ ok "Исходники распакованы в \${APP_DIR}"
 
 cd "\${APP_DIR}"
 
-# 2. Подмена порта в docker-compose.yml: внутренний 8080 → внешний APP_PORT
+# 2. Подмена порта в docker-compose.yml
 log "Настройка порта \${APP_PORT} в docker-compose.yml..."
 sed -i "s|\"8080:8080\"|\"${APP_PORT}:8080\"|g" docker-compose.yml
 ok "Порт настроен: \${APP_PORT}->8080"
 
-# 3. Проверка занятости порта
-PORT_IN_USE=false
-if ss -tln "( sport = :\${APP_PORT} )" 2>/dev/null | grep -q LISTEN; then
-  PORT_IN_USE=true
-fi
-
-if [[ "\${PORT_IN_USE}" == "true" ]]; then
-  if docker ps --format '{{.Ports}}' | grep -q ":\${APP_PORT}->"; then
-    warn "Порт \${APP_PORT} занят Docker-контейнером — будет освобождён через docker compose down"
-  else
-    warn "Порт \${APP_PORT} уже занят процессом вне Docker"
-    PIDS=\$(lsof -i :\${APP_PORT} -sTCP:LISTEN -t 2>/dev/null || true)
-    if [[ -n "\${PIDS}" ]]; then
-      warn "PID: \${PIDS}"
-    fi
-    read -r -p "Завершить процесс и продолжить? [y/N] " ANSWER </dev/tty
-    if [[ "\${ANSWER}" =~ ^[Yy]$ ]]; then
-      kill "\${PIDS}" 2>/dev/null && ok "Процесс \${PIDS} завершён" \
-        || { fuser -k \${APP_PORT}/tcp 2>/dev/null && ok "Порт \${APP_PORT} освобождён"; }
-      sleep 1
-    else
-      fail "Отмена деплоя. Освободите порт \${APP_PORT} вручную и запустите deploy.sh снова"
-    fi
-  fi
-fi
-
-# 4. Перезапуск контейнера
-PROJECT_NAME=\$(basename "\${APP_DIR}")
-if docker ps --filter "name=\${PROJECT_NAME}" --format '{{.Names}}' 2>/dev/null | grep -q .; then
-  log "Остановка предыдущего контейнера..."
-  eval "\${DOCKER_COMPOSE} down --remove-orphans"
-  ok "Контейнер остановлен"
+# 3. Остановить ЛЮБОЙ контейнер, занимающий порт APP_PORT
+#    (независимо от того, через какой compose-проект он был запущен)
+OLD_CONTAINERS=\$(docker ps -q --filter "publish=\${APP_PORT}" 2>/dev/null || true)
+if [[ -n "\${OLD_CONTAINERS}" ]]; then
+  warn "Сонтейнеры на порту \${APP_PORT}: \${OLD_CONTAINERS}"
+  log "Остановка и удаление контейнеров..."
+  docker stop \${OLD_CONTAINERS}
+  docker rm \${OLD_CONTAINERS}
+  ok "Порт \${APP_PORT} освобождён"
 else
-  log "Запущенных контейнеров не найдено — первый запуск"
+  log "Порт \${APP_PORT} свободен"
 fi
 
+# 4. Запуск
 log "Запуск контейнера..."
 eval "\${DOCKER_COMPOSE} up -d --no-build"
 ok "Контейнер запущен"
 
-# 5. Ожидание готовности (healthcheck через /actuator/health)
+# 5. Ожидание готовности
 log "Ожидание готовности приложения (max 90 сек)..."
 MAX_WAIT=90
 ELAPSED=0
